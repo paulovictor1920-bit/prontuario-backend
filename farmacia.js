@@ -221,7 +221,7 @@ const medicamentosAcrizioMenezes = [
     { nome: "Midazolam 50mg/10mL", apresentacao: "Ampola", via: "IM/EV", observacao: "" } //[cite: 2]
 ];
 
-const medicamentosRemumeUPAs = [
+const medicamentosBarreiro = [
     // Relação REMUME PBH - Itens liberados para as UPAs (nível de acesso: "Urgência")
     { nome: "Ácido Acetilsalicílico 100 mg", apresentacao: "Comprimido" }, //[cite: 1]
     { nome: "Adenosina 3 mg/ml", apresentacao: "Solução Injetável, Ampola 2 ml" }, //[cite: 1]
@@ -378,5 +378,5 @@ const medicamentosRemumeUPAs = [
 
 module.exports = {
     medicamentosAcrizioMenezes,
-    medicamentosRemumeUPAs
+    medicamentosBarreiro
 };
