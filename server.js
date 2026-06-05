@@ -3,7 +3,7 @@ const cors = require('cors');
 const NodeCache = require('node-cache');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
-// 1. Importando o banco de medicamentos que você criou
+// Importando o banco de medicamentos que montamos
 const { medicamentosAcrizioMenezes, medicamentosBarreiro } = require('./farmacia');
 
 const app = express();
@@ -15,14 +15,13 @@ const model = genAI.getGenerativeModel({ model: 'gemini-2.5-pro' });
 
 const patientCache = new NodeCache({ stdTTL: 259200, checkperiod: 3600 });
 
-// Função auxiliar para formatar a lista de medicamentos para a IA ler
 function formatarFarmacia(lista) {
     return lista.map(item => `- ${item.nome} (${item.apresentacao})`).join('\n');
 }
 
 app.post('/api/atendimento', async (req, res) => {
     try {
-        const { beId, mensagem, unidade, acao } = req.body;
+        const { beId, mensagem, unidade, opcoes } = req.body;
 
         if (!beId || !mensagem) {
             return res.status(400).json({ erro: 'Número do BE e mensagem são obrigatórios.' });
@@ -35,7 +34,6 @@ app.post('/api/atendimento', async (req, res) => {
             patientCache.ttl(beId, 259200);
         }
 
-        // 2. Injeção Dinâmica da Farmacologia Correta
         let contextoFarmacologico = '';
         if (unidade === 'BARREIRO') {
             contextoFarmacologico = `MEDICAMENTOS DISPONÍVEIS (REMUME PBH - SECUNDÁRIA/URGÊNCIA):\n${formatarFarmacia(medicamentosBarreiro)}`;
@@ -43,16 +41,24 @@ app.post('/api/atendimento', async (req, res) => {
             contextoFarmacologico = `MEDICAMENTOS DISPONÍVEIS (PADRONIZAÇÃO UPA ACRÍZIO):\n${formatarFarmacia(medicamentosAcrizioMenezes)}`;
         }
 
-        let instrucoesAcao = '';
-        if (acao === 'ALTA') {
-            instrucoesAcao = 'O médico solicitou a ALTA DOMICILIAR. Gere APENAS a receita médica de alta em bullet points na chave "prontuario".';
-        } else if (acao === 'EVOLUCAO') {
-            instrucoesAcao = 'Gere APENAS uma Evolução Médica curta baseada nos novos dados na chave "prontuario".';
-        } else {
-            instrucoesAcao = 'Gere o Prontuário Médico de Admissão completo na chave "prontuario".';
+        // --- CONSTRUÇÃO DINÂMICA DA INSTRUÇÃO BASEADA NAS CHAVES (TOGGLES) ---
+        let instrucoesAcao = "O médico solicitou as seguintes criações documentais. VOCÊ DEVE GERAR TODAS COM ABSOLUTA CONGRUÊNCIA CLÍNICA ENTRE SI (mesmos diagnósticos, mesma lógica):\n";
+        
+        if (opcoes.correcao) {
+            instrucoesAcao = "⚠️ MODO DE CORREÇÃO: O médico identificou um erro ou pediu alteração na conduta anterior. Avalie a mensagem e REESCREVA APENAS os documentos que o médico deixou marcados, aplicando a correção solicitada.\n\nDOCUMENTOS SOLICITADOS PARA CORREÇÃO:\n";
         }
 
-        // 3. O Prompt Blindado e focado no retorno JSON
+        if (opcoes.prontuario) {
+            instrucoesAcao += "- PRONTUÁRIO: Gere a Admissão ou Evolução seguindo a estrutura do SIGRAH.\n";
+        }
+        if (opcoes.alta) {
+            instrucoesAcao += "- RECEITA DE ALTA: Gere a prescrição domiciliar em bullet points. A conduta domiciliar DEVE CASAR com a hipótese diagnóstica do prontuário.\n";
+        }
+        if (opcoes.relatorio) {
+            instrucoesAcao += "- RELATÓRIO APS: Gere um resumo de contrarreferência para o Médico de Família da UBS (Atenção Primária), informando o que foi diagnosticado e tratado na UPA.\n";
+        }
+
+        // Prompt Final Blindado
         const promptFinal = `Você é um médico assistente de retaguarda em uma UPA.
 UNIDADE ATUAL: ${unidade}
 TIPO DE ATENDIMENTO: ${tipoAtendimento}
@@ -60,43 +66,36 @@ TIPO DE ATENDIMENTO: ${tipoAtendimento}
 ${contextoFarmacologico}
 
 REGRAS OBRIGATÓRIAS:
-1. FORMATO DE SAÍDA: Responda EXCLUSIVAMENTE em formato JSON contendo duas chaves exatas: 
-   - "discussao": Use esta chave para responder dúvidas do médico, alertar sobre Sinais de Alarme ou debater o caso.
-   - "prontuario": Use esta chave APENAS para o texto do prontuário final.
-2. PRESCRIÇÃO E DOSES:
+1. FORMATO DE SAÍDA EXIGIDO (JSON puro contendo sempre estas 4 chaves):
+   - "discussao": Responda dúvidas do médico, alerte sinais de gravidade ou comente o caso.
+   - "prontuario": Coloque o texto do prontuário aqui (deixe vazio "" se não foi solicitado).
+   - "receita": Coloque o texto da receita de alta aqui (deixe vazio "" se não foi solicitado).
+   - "relatorio": Coloque o texto do relatório para APS aqui (deixe vazio "" se não foi solicitado).
+
+2. PRESCRIÇÃO E DOSES NA UPA:
    - Prescreva APENAS os medicamentos listados no contexto farmacológico acima.
    - NUNCA prescreva Dipirona 500mg. Sempre utilize Dipirona 1g para analgesia.
    - Respeite os tempos de infusão rigorosamente (ex: O Ciprofloxacino 400 mg NÃO deve correr em 30 minutos).
    - Não sugira USG, Tomografia de imediato ou nebulização com gotas na emergência.
-3. ESTRUTURA DO PRONTUÁRIO: O texto dentro da chave "prontuario" deve possuir quebra de linhas limpas e seguir rigorosamente este modelo para o SIGRAH:
 
+3. ESTRUTURA PARA O SIGRAH (Se prontuário for solicitado):
 BE: [Número] - Sexo: [M/F] - Idade: [X] anos
-
-Queixa Principal (QP): [Texto conciso]
-
-História da Moléstia Atual (HMA): [Texto detalhado]
-
-História Pregressa (HP): [Texto]
-
-Exame Físico (EF):
-[Texto descritivo por sistemas]
-Sinais Vitais: [Texto]
-
+Queixa Principal (QP): [Texto]
+História da Moléstia Atual (HMA): [Texto]
+Exame Físico (EF): [Texto descritivo]
 Hipóteses Diagnósticas (HD): [Texto com CID]
+Conduta na UPA: [Medicamentos, Via, Diluição]
 
-Conduta:
-- Feito na UPA: [Lista de medicamentos com diluição e via]
-
-DIRETRIZ DA AÇÃO ATUAL:
+DIRETRIZ DA AÇÃO ATUAL (O que gerar agora):
 ${instrucoesAcao}
 
-HISTÓRICO DO PACIENTE:
+HISTÓRICO DO PACIENTE (Últimas ações no cache):
 ${JSON.stringify(historicoPaciente)}
 
 NOVA MENSAGEM DO MÉDICO:
 ${mensagem}`;
 
-        // 4. Forçando a API do Gemini a retornar JSON puro
+        // Comunicação com o Gemini forçando JSON
         const result = await model.generateContent({
             contents: [{ role: 'user', parts: [{ text: promptFinal }] }],
             generationConfig: {
@@ -107,19 +106,16 @@ ${mensagem}`;
         const respostaIA = result.response.text();
         const jsonParseado = JSON.parse(respostaIA);
 
-        // Salvando no cache
+        // Atualiza o histórico
         historicoPaciente.push({ 
             medico: mensagem, 
-            ia_discussao: jsonParseado.discussao,
-            ia_prontuario: jsonParseado.prontuario 
+            comandos: opcoes,
+            resposta: jsonParseado 
         });
         patientCache.set(beId, historicoPaciente);
 
-        // Devolvendo o objeto estruturado para o seu Frontend
-        res.json({ 
-            discussao: jsonParseado.discussao,
-            prontuario: jsonParseado.prontuario 
-        });
+        // Devolve tudo para o Frontend mostrar
+        res.json(jsonParseado);
 
     } catch (error) {
         console.error('Erro no processamento:', error);
@@ -129,5 +125,5 @@ ${mensagem}`;
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log("Servidor rodando com sucesso na porta " + PORT);
+    console.log("Servidor rodando na porta " + PORT);
 });
