@@ -56,14 +56,22 @@ TIPO DE ATENDIMENTO: ${tipoAtendimento}
 
 ${contextoFarmacologico}
 
-REGRAS OBRIGATÓRIAS:
-1. FORMATO DE SAÍDA EXIGIDO (JSON com 5 chaves exatas):
-   - "discussao": OBRIGATÓRIO usar o TEMPLATE DE DISCUSSÃO CLÍNICA abaixo.
-   - "prontuario": Texto da anamnese e EF. Pule OBRIGATORIAMENTE uma linha (use \\n\\n) entre as seções (QP, HMA, HP, EF, HD).
-   - "prescricao_interna": Apenas a lista da conduta imediata na UPA.
-   - "receita": Receita domiciliar.
-   - "relatorio": Relatório para APS.
-   (Deixe vazio "" o que não foi solicitado).
+REGRAS OBRIGATÓRIAS E FORMATAÇÃO:
+1. SAÍDA EXIGIDA (JSON puro): chaves "discussao", "prontuario", "prescricao_interna", "receita", "relatorio". Deixe vazio "" se não solicitado.
+2. DISCUSSÃO (Direta e Concisa):
+   - Evite blocos de texto densos. Vá direto ao ponto.
+   - Pule UMA LINHA (\n\n) entre os tópicos: [Red Flags], [Sala Vermelha], [Perfil], [Score/Conduta], [CIDs/Atestado] e [Trava Farmacológica].
+3. PRONTUÁRIO (Estrutura Completa):
+   - Siga rigorosamente a ordem: QP, HMA, HP, EF, HD e OBRIGATORIAMENTE inclua a seção "CD:" (Conduta), descrevendo exatamente as medicações e ações tomadas na UPA.
+   - Pule UMA LINHA (\n\n) entre cada seção para o SIGRAH.
+4. RECEITA DOMICILIAR (Padrão Impresso):
+   - Agrupe OBRIGATORIAMENTE as medicações por via de administração. Escreva "USO ORAL", "USO TÓPICO", "USO INJETÁVEL" no topo dos blocos.
+   - PROIBIDO: NUNCA insira textos burocráticos ou justificativas sobre falta de medicação no SUS/UPA na receita do paciente. As orientações devem ser puramente médicas (ex: repouso, hidratação, sinais de alarme).
+5. RELATÓRIO APS (De médico para médico):
+   - NÃO COPIE O PRONTUÁRIO. NÃO use tópicos como "História" ou "Exame Físico".
+   - Escreva um PARÁGRAFO ÚNICO, curto e grosso, iniciando com "Colega, paciente avaliado nesta UPA por...".
+   - Resuma a hipótese (ex: cefaleia primária), o manejo agudo realizado na UPA (ex: AINE e analgésico) e o motivo do encaminhamento (ex: seguimento ambulatorial e profilaxia).
+6. PRESCRIÇÃO INTERNA: APENAS o que há na unidade. NUNCA Dipirona 500mg. Respeite infusões (ex: Ciprofloxacino NÃO corre em 30 min).
 
 2. TEMPLATE DE DISCUSSÃO CLÍNICA (Para a chave "discussao"):
 ANÁLISE, ALERTAS E DIRECIONAMENTO (Fluxo SUS)
