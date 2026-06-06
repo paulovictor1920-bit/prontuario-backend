@@ -193,8 +193,19 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
         }
         const op = opcoes || { prontuario: true, alta: false, relatorio: false, correcao: false };
 
+        // Ponto 2: o médico pode ligar a "busca em fontes confiáveis" caso a caso.
+        const usarBusca = op.buscarFontes === true;
+
         const modelToUse = modeloId === 'flash' ? MODELO_RAPIDO : MODELO_PROFUNDO;
-        const model = genAI.getGenerativeModel({ model: modelToUse });
+
+        // Quando a busca está ligada, ativamos a ferramenta de busca do Gemini.
+        // OBS técnica: busca + JSON forçado não convivem na mesma chamada, então
+        // com busca ligada pedimos texto e extraímos o JSON de dentro depois.
+        const configModelo = { model: modelToUse };
+        if (usarBusca) {
+            configModelo.tools = [{ googleSearch: {} }];
+        }
+        const model = genAI.getGenerativeModel(configModelo);
 
         let historicoPaciente = patientCache.get(beId) || [];
         let tipoAtendimento = historicoPaciente.length > 0
@@ -217,6 +228,29 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
         if (op.alta) instrucoesAcao += '- RECEITA DE ALTA.\n';
         if (op.relatorio) instrucoesAcao += '- RELATÓRIO APS.\n';
 
+        // Ponto 2: bloco de fontes confiáveis (só entra no prompt se busca ligada).
+        // A IA usa a busca do Gemini priorizando estas fontes e cita o link na
+        // discussão. Buscamos a página atual na hora (link sempre válido).
+        let blocoFontes = '';
+        if (usarBusca) {
+            blocoFontes = `
+BUSCA EM FONTES CONFIÁVEIS — ATIVADA:
+Use a busca para fundamentar diagnóstico/conduta em fontes científicas
+brasileiras de alta credibilidade. PRIORIZE, nesta ordem:
+- Ministério da Saúde / SUS (gov.br/saude, bvsms.saude.gov.br) e PCDT.
+- Protocolos da Prefeitura de Belo Horizonte (prefeitura.pbh.gov.br/saude).
+- Sociedades de especialidade, por ex.: Sociedade Brasileira de Cardiologia
+  (portal.cardiol.br), Sociedade Brasileira de Pediatria (sbp.com.br),
+  FEBRASGO (febrasgo.org.br), Sociedade Brasileira de Psiquiatria, de
+  Infectologia, de Pneumologia, de Clínica Médica, ABRAMEDE (medicina de
+  emergência), de Nefrologia, de Reumatologia, conforme o caso.
+- Diretrizes internacionais reconhecidas só se não houver equivalente nacional.
+REGRAS: cite o link da fonte ao final da "discussao" (campo "fontes"). NÃO
+invente fonte nem link. Se a busca não trouxer nada útil, diga isso na discussão
+e prossiga com conhecimento geral, sinalizando que não houve fonte confirmada.
+`;
+        }
+
         // ------------------------------------------------------------------
         //  PROMPT — agora pedindo o prontuário JÁ SEPARADO nos campos do SIGRAH.
         // ------------------------------------------------------------------
@@ -225,7 +259,7 @@ UNIDADE: ${unidade}
 TIPO DE ATENDIMENTO: ${tipoAtendimento}
 
 ${contextoFarmacologico}
-
+${blocoFontes}
 REGRAS DE SAÍDA (responda em JSON puro com EXATAMENTE estas chaves):
 {
   "discussao": "",
@@ -240,19 +274,30 @@ REGRAS DE SAÍDA (responda em JSON puro com EXATAMENTE estas chaves):
   },
   "prescricao_interna": "",
   "receita": "",
-  "relatorio": ""
+  "relatorio": "",
+  "fontes": ""
 }
 
 INSTRUÇÕES DE CADA CAMPO:
 
 1. "discussao": análise de retaguarda concisa. Inclua red flags, raciocínio,
-   diagnósticos "can't miss", e análise da prescrição/interações. No FINAL,
-   escreva em destaque: "CID: <código e descrição>".
+   diagnósticos "can't miss", e análise da prescrição/interações.
+   ESTE é o ÚNICO campo onde você PODE e DEVE expressar INCERTEZAS: marque
+   claramente o que é dúvida, o que depende de exame para confirmar/descartar,
+   e onde você tem menos confiança (ex: "ATENÇÃO: dose pediátrica — confira",
+   "não dá para descartar X sem ECG"). Seja transparente sobre o grau de
+   certeza. No FINAL, escreva em destaque: "CID: <código e descrição>".
+   REGRA ABSOLUTA: NENHUMA incerteza, dúvida ou linguagem reflexiva pode
+   aparecer nos campos do "prontuario". Toda hesitação fica AQUI, na discussão.
 
 2. "cid": APENAS o(s) código(s) CID e descrição. Ex: "J00 - Nasofaringite aguda".
    Nada além disso neste campo.
 
-3. "prontuario" — preencha cada subcampo SEPARADAMENTE para encaixar no SIGRAH:
+3. "prontuario" — preencha cada subcampo SEPARADAMENTE para encaixar no SIGRAH.
+   IMPORTANTE: o prontuário é DOCUMENTO DESCRITIVO E ASSERTIVO, não de reflexão.
+   NUNCA escreva incertezas, dúvidas ou "pode ser/não descartado" aqui. No
+   máximo, liste mais de uma hipótese diagnóstica quando clinicamente cabível,
+   mas sem linguagem hesitante. Toda dúvida pertence à "discussao".
    - "historia_clinica": queixa, tempo de evolução, acompanhante, negativas
      relevantes. (corresponde ao campo 01 do SIGRAH)
    - "historia_pregressa": comorbidades, alergias, vacinas, uso de medicações
@@ -310,23 +355,45 @@ ${JSON.stringify(historicoPaciente)}
 MENSAGEM DO MÉDICO:
 ${mensagem}`;
 
+        // Configuração de geração. Com busca ligada NÃO usamos JSON forçado
+        // (são incompatíveis no Gemini); pedimos para a IA devolver o JSON
+        // dentro do texto e extraímos depois.
+        const generationConfig = { maxOutputTokens: 8192, temperature: 0.4 };
+        if (!usarBusca) {
+            generationConfig.responseMimeType = 'application/json';
+        }
+
         const result = await model.generateContent({
             contents: [{ role: 'user', parts: [{ text: promptFinal }] }],
-            generationConfig: {
-                responseMimeType: 'application/json',
-                maxOutputTokens: 8192,
-                temperature: 0.4
-            }
+            generationConfig
         });
 
-        const textoBruto = result.response.text();
-        let dados;
-        try {
-            dados = JSON.parse(textoBruto);
-        } catch (erroParse) {
+        let textoBruto = result.response.text();
+
+        // Se a busca estava ligada, o texto pode vir com cercas ```json ... ```
+        // ou texto em volta. Extraímos o objeto JSON de dentro com segurança.
+        function extrairJson(txt) {
+            if (!txt) return null;
+            // tenta direto
+            try { return JSON.parse(txt); } catch (e) {}
+            // remove cercas de código
+            let limpo = txt.replace(/```json/gi, '').replace(/```/g, '').trim();
+            try { return JSON.parse(limpo); } catch (e) {}
+            // pega do primeiro { até o último }
+            const ini = limpo.indexOf('{');
+            const fim = limpo.lastIndexOf('}');
+            if (ini !== -1 && fim !== -1 && fim > ini) {
+                try { return JSON.parse(limpo.slice(ini, fim + 1)); } catch (e) {}
+            }
+            return null;
+        }
+
+        let dados = extrairJson(textoBruto);
+        if (!dados) {
             console.error('IA devolveu JSON inválido:\n', textoBruto);
             return res.status(502).json({
-                erro: 'A IA devolveu resposta incompleta. Tente enviar de novo.'
+                erro: 'A IA devolveu resposta incompleta. Tente enviar de novo' +
+                      (usarBusca ? ' (a busca em fontes às vezes alonga a resposta; tente sem ela se persistir).' : '.')
             });
         }
 
@@ -352,6 +419,12 @@ ${mensagem}`;
                     + dil.naoEncontrados.join('\n- ');
                 dados.discussao = (dados.discussao || '') + aviso;
             }
+        }
+
+        // --- Fontes citadas (ponto 2): anexa o link ao fim da discussão ---
+        if (dados.fontes && dados.fontes.trim()) {
+            dados.discussao = (dados.discussao || '')
+                + '\n\n📚 FONTES CONSULTADAS:\n' + dados.fontes.trim();
         }
 
         // Salva no histórico.
