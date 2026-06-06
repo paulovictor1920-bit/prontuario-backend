@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Prontuário Rápido - UPA</title>
+<style>
+    :root{
+        --bg:#121212; --panel:#1e1e1e; --box:#2c2c2c; --line:#333;
+        --azul:#4facfe; --azulf:#00f2fe; --verde:#4caf50; --amarelo:#ffca28;
+    }
+    *{box-sizing:border-box;}
+    body{
+        background:var(--bg); color:#e0e0e0;
+        font-family:'Segoe UI',Tahoma,sans-serif;
+        margin:0 auto; padding:16px; max-width:920px;
+        display:flex; flex-direction:column; gap:16px;
+    }
+    .panel{background:var(--panel); border-radius:10px; padding:18px;
+        box-shadow:0 4px 6px rgba(0,0,0,.3);}
+    h2{margin:0 0 14px; font-size:18px; color:var(--azul);
+        border-bottom:1px solid var(--line); padding-bottom:8px;}
+    h3{font-size:14px; color:#fff; margin:0 0 4px;}
+    label{font-weight:bold; font-size:13px; display:block; margin-bottom:4px;}
+    input[type=text],select,textarea{
+        background:var(--box); color:#fff; border:1px solid var(--line);
+        border-radius:5px; padding:9px; width:100%; font-family:inherit; font-size:14px;}
+    textarea{min-height:90px; resize:vertical;}
+    .grid-2{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:12px;}
+    .options-grid{display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:12px 0;
+        background:#252525; padding:12px; border-radius:8px; border:1px solid var(--line);}
+    .options-grid label{font-weight:normal; margin:0; display:flex; align-items:center; gap:8px; cursor:pointer;}
+    .options-grid input{transform:scale(1.2); accent-color:var(--azul);}
+    .correcao-label{color:var(--amarelo); font-weight:bold!important; grid-column:span 2;}
+    .btn-main{background:var(--azul); color:#fff; border:none; padding:14px;
+        border-radius:5px; cursor:pointer; font-weight:bold; font-size:16px; width:100%; transition:.2s;}
+    .btn-main:hover{background:var(--azulf);}
+    .btn-main:disabled{background:#555; cursor:not-allowed; opacity:.7;}
+    .field-mb{margin-bottom:12px;}
+
+    /* Caixas de resultado */
+    .doc{display:none; margin-bottom:14px; border:1px solid var(--line);
+        border-radius:8px; overflow:hidden;}
+    .doc-head{display:flex; justify-content:space-between; align-items:center;
+        background:#262626; padding:8px 12px;}
+    .doc-head h3{margin:0;}
+    .box{white-space:pre-wrap; background:var(--box); padding:13px;
+        font-family:monospace; font-size:13px; line-height:1.55; border-left:4px solid var(--azul);}
+    .box-discussao{border-left-color:var(--amarelo); color:#fffde7;}
+    .box-vitais{border-left-color:#888; color:#cfd8dc; font-size:14px;}
+    .box-diluicao{border-left-color:#29b6f6; color:#e1f5fe; font-size:12.5px;}
+
+    /* CID em destaque */
+    #cidWrap{display:none; background:#3a3000; border:2px solid var(--amarelo);
+        border-radius:8px; padding:12px; margin-bottom:14px;}
+    #cidWrap h3{color:var(--amarelo); margin-bottom:6px;}
+    #resCid{font-size:18px; font-weight:bold; color:var(--amarelo); font-family:monospace;}
+
+    .btn-copiar{background:#333; color:var(--verde); border:1px solid var(--verde);
+        padding:6px 11px; border-radius:4px; cursor:pointer; font-size:12px; font-weight:bold; transition:.2s;}
+    .btn-copiar:hover{background:var(--verde); color:#fff;}
+    .loading{display:none; color:var(--azul); font-weight:bold; text-align:center; margin:10px 0;}
+    .nota{font-size:11px; color:#888; margin-top:4px;}
+</style>
+</head>
+<body>
+
+<div class="panel">
+    <h2>📥 Entrada de Dados</h2>
+    <div class="grid-2">
+        <div>
+            <label for="unidade">Unidade:</label>
+            <select id="unidade" onchange="ajustarUnidade()">
+                <option value="ACRIZIO">UPA Acrízio Menezes</option>
+                <option value="BARREIRO">UPA Barreiro (PBH / SIGRAH)</option>
+            </select>
+        </div>
+        <div>
+            <label for="modeloIA">Velocidade da IA:</label>
+            <select id="modeloIA">
+                <option value="pro">Pro (mais raciocínio, lento)</option>
+                <option value="flash">Flash (mais rápido)</option>
+            </select>
+        </div>
+    </div>
+
+    <div class="field-mb">
+        <label for="beId">Número do BE:</label>
+        <input type="text" id="beId" placeholder="Ex: 12345">
+    </div>
+
+    <div class="field-mb">
+        <label for="mensagem">Relato Clínico ou Dúvida:</label>
+        <textarea id="mensagem" placeholder="Paciente 18a, cefaleia unilateral pulsátil..."></textarea>
+    </div>
+
+    <div class="options-grid">
+        <label><input type="checkbox" id="chkProntuario" checked> 📝 Prontuário</label>
+        <label><input type="checkbox" id="chkAlta"> 🏠 Receita Alta</label>
+        <label><input type="checkbox" id="chkRelatorio"> 📋 Relatório APS</label>
+        <label><input type="checkbox" id="chkBuscar"> 🔎 Buscar em fontes (+ lento)</label>
+        <label class="correcao-label"><input type="checkbox" id="chkCorrecao"> ⚠️ Apenas Corrigir</label>
+    </div>
+
+    <div class="loading" id="loading">🧠 Processando raciocínio e documentos...</div>
+    <button id="btnEnviar" class="btn-main" onclick="enviarDados()">🚀 Enviar Entrada</button>
+</div>
+
+<div class="panel">
+    <h2>💡 Discussão e Documentos</h2>
+
+    <!-- Discussão -->
+    <div class="doc" id="docDiscussao" style="display:block;">
+        <div class="doc-head"><h3>💡 Discussão de Retaguarda</h3></div>
+        <div id="resDiscussao" class="box box-discussao">Aguardando entrada de dados...</div>
+    </div>
+
+    <!-- CID destacado -->
+    <div id="cidWrap">
+        <div class="doc-head" style="background:transparent; padding:0 0 6px;">
+            <h3>🏷️ CID</h3>
+            <button class="btn-copiar" onclick="copiar('resCid',this)">Copiar CID</button>
+        </div>
+        <div id="resCid"></div>
+    </div>
+
+    <!-- Campos do prontuário (separados) -->
+    <div id="grupoProntuario"></div>
+
+    <!-- Prescrição interna -->
+    <div class="doc" id="docPresc">
+        <div class="doc-head"><h3>💉 Prescrição na UPA</h3>
+            <button class="btn-copiar" onclick="copiar('resPresc',this)">Copiar</button></div>
+        <div id="resPresc" class="box"></div>
+    </div>
+
+    <!-- Diluições (só Barreiro) -->
+    <div class="doc" id="docDiluicao">
+        <div class="doc-head"><h3>💧 Diluições (Barreiro)</h3>
+            <button class="btn-copiar" onclick="copiar('resDiluicao',this)">Copiar</button></div>
+        <div id="resDiluicao" class="box box-diluicao"></div>
+    </div>
+
+    <!-- Receita -->
+    <div class="doc" id="docReceita">
+        <div class="doc-head"><h3>🏠 Receita Domiciliar</h3>
+            <button class="btn-copiar" onclick="copiar('resReceita',this)">Copiar</button></div>
+        <div id="resReceita" class="box"></div>
+    </div>
+
+    <!-- Relatório -->
+    <div class="doc" id="docRelatorio">
+        <div class="doc-head"><h3>📋 Relatório APS</h3>
+            <button class="btn-copiar" onclick="copiar('resRelatorio',this)">Copiar</button></div>
+        <div id="resRelatorio" class="box"></div>
+    </div>
+</div>
+
+<script>
+    const API_URL = 'https://prontuario-backend-f1qk.onrender.com/api/atendimento';
+
+    // Campos do prontuário, na ordem do SIGRAH. "vital" = quadro separado (não copiável junto).
+    const CAMPOS_PRONT = [
+        {key:'historia_clinica',  titulo:'01 – História Clínica'},
+        {key:'historia_pregressa',titulo:'02 – História Pregressa'},
+        {key:'sinais_vitais',     titulo:'03 – Sinais Vitais (campos próprios no SIGRAH)', vital:true},
+        {key:'exame_fisico_texto',titulo:'03 – Exame Físico (texto)'},
+        {key:'hipotese_diagnostica',titulo:'04 – Hipótese Diagnóstica'},
+        {key:'conduta',           titulo:'06 – Conduta'}
+    ];
+
+    function ajustarUnidade(){
+        // só visual; o backend decide as diluições.
+    }
+
+    function setBox(idDoc, idRes, texto){
+        const doc = document.getElementById(idDoc);
+        const res = document.getElementById(idRes);
+        if(texto && texto.trim() !== ''){
+            res.innerText = texto;
+            doc.style.display = 'block';
+        } else {
+            doc.style.display = 'none';
+        }
+    }
+
+    function montarProntuario(pront){
+        const grupo = document.getElementById('grupoProntuario');
+        grupo.innerHTML = '';
+        if(!pront) return;
+        CAMPOS_PRONT.forEach((c,i)=>{
+            const val = pront[c.key];
+            if(!val || !val.trim()) return;
+            const idRes = 'pront_'+i;
+            const ehVital = c.vital === true;
+            const div = document.createElement('div');
+            div.className = 'doc';
+            div.style.display = 'block';
+            // quadro de vitais NÃO tem botão de copiar (já tem campo próprio no sistema)
+            const botao = ehVital ? '' :
+                `<button class="btn-copiar" onclick="copiar('${idRes}',this)">Copiar</button>`;
+            const classeBox = ehVital ? 'box box-vitais' : 'box';
+            const nota = ehVital ? '<div class="nota">Digite estes valores nos campos próprios do SIGRAH — não copie junto do exame físico.</div>' : '';
+            div.innerHTML =
+                `<div class="doc-head"><h3>${c.titulo}</h3>${botao}</div>
+                 <div id="${idRes}" class="${classeBox}"></div>${nota}`;
+            grupo.appendChild(div);
+            document.getElementById(idRes).innerText = val.trim();
+        });
+    }
+
+    async function enviarDados(){
+        const beId = document.getElementById('beId').value;
+        const mensagem = document.getElementById('mensagem').value;
+        const unidade = document.getElementById('unidade').value;
+        const modeloId = document.getElementById('modeloIA').value;
+        const btn = document.getElementById('btnEnviar');
+        const opcoes = {
+            prontuario: document.getElementById('chkProntuario').checked,
+            alta: document.getElementById('chkAlta').checked,
+            relatorio: document.getElementById('chkRelatorio').checked,
+            correcao: document.getElementById('chkCorrecao').checked,
+            buscarFontes: document.getElementById('chkBuscar').checked
+        };
+        if(!beId || !mensagem){ alert('Preencha o Número do BE e o Relato.'); return; }
+
+        btn.disabled = true;
+        document.getElementById('loading').innerText = opcoes.buscarFontes
+            ? '🔎 Buscando em fontes confiáveis (pode demorar um pouco mais)...'
+            : '🧠 Processando raciocínio e documentos...';
+        document.getElementById('loading').style.display = 'block';
+        document.getElementById('resDiscussao').innerText = 'Analisando caso...';
+        // esconde tudo
+        ['docPresc','docDiluicao','docReceita','docRelatorio','cidWrap'].forEach(id=>{
+            document.getElementById(id).style.display='none';
+        });
+        document.getElementById('grupoProntuario').innerHTML='';
+
+        try{
+            const resp = await fetch(API_URL,{
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({beId,mensagem,unidade,opcoes,modeloId})
+            });
+            const data = await resp.json();
+            if(data.erro){ alert('Erro: '+data.erro); }
+            else{
+                document.getElementById('resDiscussao').innerText = data.discussao || 'Nenhuma discussão gerada.';
+                // CID destacado
+                setBox('cidWrap','resCid', data.cid);
+                document.getElementById('cidWrap').style.display = (data.cid && data.cid.trim()) ? 'block':'none';
+                // prontuário em campos separados
+                montarProntuario(data.prontuario);
+                // demais documentos
+                setBox('docPresc','resPresc', data.prescricao_interna);
+                setBox('docDiluicao','resDiluicao', data.diluicoes);
+                setBox('docReceita','resReceita', data.receita);
+                setBox('docRelatorio','resRelatorio', data.relatorio);
+            }
+        }catch(e){
+            alert('Erro de conexão com o servidor.');
+        }finally{
+            btn.disabled = false;
+            document.getElementById('loading').style.display = 'none';
+        }
+    }
+
+    // ---- Cópia com fallback pra PCs antigos ----
+    function copiar(elementId, btn){
+        const div = document.getElementById(elementId);
+        const texto = div.innerText;
+        if(navigator.clipboard && window.isSecureContext){
+            navigator.clipboard.writeText(texto).then(()=>efeito(btn)).catch(()=>fallback(div,btn));
+        } else { fallback(div,btn); }
+    }
+    function fallback(div,btn){
+        const range=document.createRange(); range.selectNode(div);
+        const sel=window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+        try{ document.execCommand('copy'); efeito(btn); }
+        catch(e){ alert('Cópia automática bloqueada. Selecione o texto e use Ctrl+C.'); }
+        sel.removeAllRanges();
+    }
+    function efeito(btn){
+        if(!btn) return;
+        const orig=btn.innerText;
+        btn.innerText='✓ Copiado!'; btn.style.background='#4caf50'; btn.style.color='#fff';
+        setTimeout(()=>{btn.innerText=orig; btn.style.background='#333'; btn.style.color='#4caf50';},1500);
+    }
+</script>
+</body>
+</html>
