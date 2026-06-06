@@ -152,7 +152,7 @@ const medicamentosAcrizioMenezes = [
     { nome: "Óleo de Girassol", apresentacao: "Óleo", via: "Tópico", observacao: "" }, //[cite: 2]
 
     // Diuréticos e Laxativos
-    { nome: "Espironolactona 20mg/2ml (Wait, original says Comprimido)", apresentacao: "Comprimido", via: "Oral", observacao: "Insuf. Cardíaca" }, //[cite: 2]
+    { nome: "Espironolactona 25mg", apresentacao: "Comprimido", via: "Oral", observacao: "Insuf. Cardíaca" }, //[cite: 2]
     { nome: "Furosemida 20mg/2ml", apresentacao: "Ampola", via: "IM/EV", observacao: "" }, //[cite: 2]
     { nome: "Furosemida 40mg", apresentacao: "Comprimido", via: "Oral", observacao: "" }, //[cite: 2]
     { nome: "Hidroclorotiazida 25mg", apresentacao: "Comprimido", via: "Oral", observacao: "" }, //[cite: 2]
