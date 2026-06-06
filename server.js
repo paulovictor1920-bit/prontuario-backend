@@ -30,9 +30,9 @@ const MODELO_RAPIDO = 'gemini-3.5-flash';
 const MODELO_PROFUNDO = 'gemini-2.5-pro';
 
 // Sites autorizados a usar a API. Vazio = libera geral (modo teste).
-// Quando hospedar o HTML, coloque o link aqui (ex: 'https://seu-site.netlify.app').
+// Abaixo esta o link do seu site (GitHub Pages), ja configurado.
 const SITES_PERMITIDOS = [
-    // 'https://seu-site.netlify.app',
+    'https://paulovictor1920-bit.github.io',
 ];
 
 const TEMPO_HISTORICO = 259200; // 72 horas em segundos
