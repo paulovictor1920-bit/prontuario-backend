@@ -257,19 +257,41 @@ INSTRUÇÕES DE CADA CAMPO:
      relevantes. (corresponde ao campo 01 do SIGRAH)
    - "historia_pregressa": comorbidades, alergias, vacinas, uso de medicações
      crônicas. (campo 02)
-   - "exame_fisico_texto": APENAS o exame físico descritivo (estado geral,
-     ACV, AR, abdome, etc). NÃO inclua sinais vitais numéricos aqui, pois eles
-     têm campo próprio. (campo 03 - parte textual)
+   - "exame_fisico_texto": exame físico descritivo. NÃO inclua sinais vitais
+     numéricos aqui (têm campo próprio). FORMATO OBRIGATÓRIO: UMA LINHA POR
+     SISTEMA, usando abreviações e quebra de linha real (\\n) entre cada uma.
+     Use estas abreviações: BEG (bom estado geral), ACV (ap. cardiovascular),
+     AR (ap. respiratório), AD (abdome), MVF (murmúrio vesicular fisiológico),
+     RA (ruídos adventícios). SIGA EXATAMENTE ESTE MODELO:
+     "BEG, orientada no tempo e no espaço, eupneica, corada, hidratada, acianótica, anictérica
+ACV: ritmo cardíaco regular em 2 tempos, bulhas normofonéticas, sem sopros
+AR: MVF presente bilateralmente, sem RA
+AD: plano, flácido, RHA presentes, indolor à palpação, sem massas ou visceromegalias
+Neurológico: ECG 15, pupilas isocóricas e fotorreagentes, pares cranianos preservados, força e sensibilidade preservadas e simétricas nos 4 membros, sem sinais de irritação meníngea"
+     (campo 03 - parte textual)
    - "sinais_vitais": só os números, no formato "SpO2: __ | FC: __ | FR: __ |
      PA: __ | Tax: __ °C | Peso: __ kg". Se algum não foi informado, deixe em
      branco após os dois-pontos. (vai num quadro separado, NÃO copiado junto)
    - "hipotese_diagnostica": a(s) hipótese(s) em texto. (campo 04)
-   - "conduta": condutas tomadas e orientações. Use "CD:" no início. (campo 06)
+   - "conduta": condutas tomadas e orientações. FORMATO OBRIGATÓRIO: comece com
+     "CD:" sozinho na primeira linha, depois ITENS COM HÍFEN, um por linha
+     (quebra real \\n). AGRUPE ações relacionadas no mesmo item em vez de
+     fragmentar; mire em 4 a 6 itens. MANTENHA doses e posologia. MODELO:
+     "CD:
+- Medicação sintomática na unidade: Tenoxicam 20 mg IM + Dipirona 1 g (40 gotas) VO, e repouso em ambiente calmo.
+- Reavaliação clínica após o efeito; se melhora completa, alta com orientações de sinais de alerta (piora súbita, febre, alteração visual ou motora).
+- Entrega de receita domiciliar (Sumatriptano, Naproxeno, Metoclopramida).
+- Atestado de 1 dia e encaminhamento para acompanhamento na APS."
+     (campo 06)
 
 4. "prescricao_interna": medicações usadas NA UPA. APENAS itens da lista desta
-   unidade. Respeite a via indicada. Uma medicação por linha, com dose, via e
+   unidade. Respeite a via indicada. FORMATO OBRIGATÓRIO: itens ENUMERADOS
+   (1., 2., 3.), UM POR LINHA (quebra real \\n), cada um com dose, via e
    frequência. Para injetáveis, escreva claramente "ampola/frasco" e a via
-   (EV/IM) para o sistema localizar a diluição.
+   (EV/IM) para o sistema localizar a diluição. MODELO:
+   "1. Dipirona 1 g (2 mL) EV agora.
+2. Tenoxicam 20 mg IM agora.
+3. SF 0,9% 500 mL EV se necessário."
 
 5. "receita": receita domiciliar agrupada por via (USO ORAL, USO TÓPICO...).
    Sem textos burocráticos sobre falta de medicação.
