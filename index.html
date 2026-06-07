@@ -1,76 +1,115 @@
 <!DOCTYPE html>
-<html lang="pt-BR">
+<html lang="pt-BR" data-tema="escuro">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Prontuário Rápido - UPA</title>
 <style>
-    :root{
+    html[data-tema="escuro"]{
         --bg:#121212; --panel:#1e1e1e; --box:#2c2c2c; --line:#333;
+        --texto:#e0e0e0; --titulo:#fff; --nota:#888;
         --azul:#4facfe; --azulf:#00f2fe; --verde:#4caf50; --amarelo:#ffca28;
+        --cid-bg:#3a3000; --vital-txt:#cfd8dc; --disc-txt:#fffde7; --dil-txt:#e1f5fe;
+    }
+    html[data-tema="claro"]{
+        --bg:#f0f2f5; --panel:#ffffff; --box:#f5f7fa; --line:#d0d7de;
+        --texto:#1a1a1a; --titulo:#0a0a0a; --nota:#666;
+        --azul:#1976d2; --azulf:#1565c0; --verde:#2e7d32; --amarelo:#b08400;
+        --cid-bg:#fff8e1; --vital-txt:#37474f; --disc-txt:#3a3000; --dil-txt:#0d3c55;
     }
     *{box-sizing:border-box;}
     body{
-        background:var(--bg); color:#e0e0e0;
+        background:var(--bg); color:var(--texto);
         font-family:'Segoe UI',Tahoma,sans-serif;
         margin:0 auto; padding:16px; max-width:920px;
-        display:flex; flex-direction:column; gap:16px;
+        display:flex; flex-direction:column; gap:16px; transition:background .2s,color .2s;
     }
-    .panel{background:var(--panel); border-radius:10px; padding:18px;
-        box-shadow:0 4px 6px rgba(0,0,0,.3);}
-    h2{margin:0 0 14px; font-size:18px; color:var(--azul);
-        border-bottom:1px solid var(--line); padding-bottom:8px;}
-    h3{font-size:14px; color:#fff; margin:0 0 4px;}
-    label{font-weight:bold; font-size:13px; display:block; margin-bottom:4px;}
-    input[type=text],select,textarea{
-        background:var(--box); color:#fff; border:1px solid var(--line);
+    .panel{background:var(--panel); border-radius:10px; padding:18px; box-shadow:0 4px 6px rgba(0,0,0,.15);}
+    .topbar{display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:14px;}
+    h2{margin:0; font-size:18px; color:var(--azul); border-bottom:1px solid var(--line); padding-bottom:8px; flex:1;}
+    h3{font-size:14px; color:var(--titulo); margin:0 0 4px;}
+    label{font-weight:bold; font-size:13px; display:block; margin-bottom:4px; color:var(--texto);}
+    input[type=text],input[type=number],select,textarea{
+        background:var(--box); color:var(--texto); border:1px solid var(--line);
         border-radius:5px; padding:9px; width:100%; font-family:inherit; font-size:14px;}
     textarea{min-height:90px; resize:vertical;}
+    .grid-3{display:grid; grid-template-columns:1.4fr 1fr 1fr; gap:10px; margin-bottom:12px;}
     .grid-2{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:12px;}
     .options-grid{display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:12px 0;
-        background:#252525; padding:12px; border-radius:8px; border:1px solid var(--line);}
+        background:var(--box); padding:12px; border-radius:8px; border:1px solid var(--line);}
     .options-grid label{font-weight:normal; margin:0; display:flex; align-items:center; gap:8px; cursor:pointer;}
     .options-grid input{transform:scale(1.2); accent-color:var(--azul);}
     .correcao-label{color:var(--amarelo); font-weight:bold!important; grid-column:span 2;}
-    .btn-main{background:var(--azul); color:#fff; border:none; padding:14px;
-        border-radius:5px; cursor:pointer; font-weight:bold; font-size:16px; width:100%; transition:.2s;}
+    .btn-main{background:var(--azul); color:#fff; border:none; padding:14px; border-radius:5px;
+        cursor:pointer; font-weight:bold; font-size:16px; flex:1; transition:.2s;}
     .btn-main:hover{background:var(--azulf);}
-    .btn-main:disabled{background:#555; cursor:not-allowed; opacity:.7;}
+    .btn-main:disabled{background:#777; cursor:not-allowed; opacity:.7;}
+    .btn-limpar{background:transparent; color:var(--nota); border:1px solid var(--line);
+        padding:14px 18px; border-radius:5px; cursor:pointer; font-weight:bold; font-size:14px;}
+    .btn-limpar:hover{border-color:var(--azul); color:var(--azul);}
+    .linha-acoes{display:flex; gap:10px;}
     .field-mb{margin-bottom:12px;}
-
-    /* Caixas de resultado */
-    .doc{display:none; margin-bottom:14px; border:1px solid var(--line);
-        border-radius:8px; overflow:hidden;}
-    .doc-head{display:flex; justify-content:space-between; align-items:center;
-        background:#262626; padding:8px 12px;}
+    .btn-tema{background:var(--box); color:var(--texto); border:1px solid var(--line); border-radius:20px;
+        padding:6px 14px; cursor:pointer; font-size:13px; font-weight:bold; white-space:nowrap;}
+    .segmented{display:grid; grid-template-columns:1fr 1fr; gap:0; margin-bottom:12px;
+        border:1px solid var(--azul); border-radius:8px; overflow:hidden;}
+    .segmented button{background:transparent; color:var(--azul); border:none; padding:12px;
+        font-size:15px; font-weight:bold; cursor:pointer; transition:.15s;}
+    .segmented button.ativo{background:var(--azul); color:#fff;}
+    .toggle-upa{display:flex; align-items:center; justify-content:space-between; background:var(--box);
+        border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:12px;}
+    .toggle-upa .lbl{font-weight:bold; font-size:14px; color:var(--titulo);}
+    .toggle-upa .sub{font-size:11px; color:var(--nota); margin-top:2px; font-weight:normal;}
+    .switch{position:relative; width:52px; height:28px; flex:0 0 auto;}
+    .switch input{opacity:0; width:0; height:0;}
+    .slider{position:absolute; inset:0; background:#999; border-radius:28px; transition:.2s; cursor:pointer;}
+    .slider:before{content:""; position:absolute; height:22px; width:22px; left:3px; top:3px;
+        background:#fff; border-radius:50%; transition:.2s;}
+    .switch input:checked + .slider{background:var(--verde);}
+    .switch input:checked + .slider:before{transform:translateX(24px);}
+    .recentes{display:flex; flex-wrap:wrap; gap:8px; margin-top:6px;}
+    .chip-be{background:var(--box); border:1px solid var(--azul); color:var(--azul); padding:6px 12px;
+        border-radius:20px; cursor:pointer; font-size:13px; font-weight:bold; transition:.15s;}
+    .chip-be:hover{background:var(--azul); color:#fff;}
+    .chip-vazio{color:var(--nota); font-size:12px; font-style:italic;}
+    .doc{display:none; margin-bottom:14px; border:1px solid var(--line); border-radius:8px; overflow:hidden;}
+    .doc-head{display:flex; justify-content:space-between; align-items:center; background:var(--box); padding:8px 12px;}
     .doc-head h3{margin:0;}
-    .box{white-space:pre-wrap; background:var(--box); padding:13px;
-        font-family:monospace; font-size:13px; line-height:1.55; border-left:4px solid var(--azul);}
-    .box-discussao{border-left-color:var(--amarelo); color:#fffde7;}
-    .box-vitais{border-left-color:#888; color:#cfd8dc; font-size:14px;}
-    .box-diluicao{border-left-color:#29b6f6; color:#e1f5fe; font-size:12.5px;}
-
-    /* CID em destaque */
-    #cidWrap{display:none; background:#3a3000; border:2px solid var(--amarelo);
-        border-radius:8px; padding:12px; margin-bottom:14px;}
+    .box{white-space:pre-wrap; background:var(--box); padding:13px; font-family:monospace; font-size:13px;
+        line-height:1.55; border-left:4px solid var(--azul); color:var(--texto);}
+    .box-discussao{border-left-color:var(--amarelo); color:var(--disc-txt);}
+    .box-vitais{border-left-color:#888; color:var(--vital-txt); font-size:14px;}
+    .box-diluicao{border-left-color:#29b6f6; color:var(--dil-txt); font-size:12.5px;}
+    .box-evolucao{border-left-color:var(--verde);}
+    #cidWrap{display:none; background:var(--cid-bg); border:2px solid var(--amarelo); border-radius:8px;
+        padding:12px; margin-bottom:14px;}
     #cidWrap h3{color:var(--amarelo); margin-bottom:6px;}
     #resCid{font-size:18px; font-weight:bold; color:var(--amarelo); font-family:monospace;}
-
-    .btn-copiar{background:#333; color:var(--verde); border:1px solid var(--verde);
-        padding:6px 11px; border-radius:4px; cursor:pointer; font-size:12px; font-weight:bold; transition:.2s;}
+    .btn-copiar{background:transparent; color:var(--verde); border:1px solid var(--verde); padding:6px 11px;
+        border-radius:4px; cursor:pointer; font-size:12px; font-weight:bold; transition:.2s;}
     .btn-copiar:hover{background:var(--verde); color:#fff;}
     .loading{display:none; color:var(--azul); font-weight:bold; text-align:center; margin:10px 0;}
-    .nota{font-size:11px; color:#888; margin-top:4px;}
+    .nota{font-size:11px; color:var(--nota); margin-top:4px;}
 </style>
 </head>
 <body>
 
 <div class="panel">
-    <h2>📥 Entrada de Dados</h2>
+    <div class="topbar">
+        <h2>📥 Entrada de Dados</h2>
+        <button class="btn-tema" id="btnTema" onclick="alternarTema()">☀️ Tema claro</button>
+    </div>
+
+    <label>Tipo de documento:</label>
+    <div class="segmented" id="segTipo">
+        <button class="ativo" data-tipo="prontuario" onclick="setTipo('prontuario')">📝 Prontuário</button>
+        <button data-tipo="evolucao" onclick="setTipo('evolucao')">🔄 Evolução</button>
+    </div>
+
     <div class="grid-2">
         <div>
             <label for="unidade">Unidade:</label>
-            <select id="unidade" onchange="ajustarUnidade()">
+            <select id="unidade">
                 <option value="ACRIZIO">UPA Acrízio Menezes</option>
                 <option value="BARREIRO">UPA Barreiro (PBH / SIGRAH)</option>
             </select>
@@ -84,38 +123,68 @@
         </div>
     </div>
 
+    <div class="grid-3">
+        <div>
+            <label for="beId">Número do BE:</label>
+            <input type="text" id="beId" placeholder="Ex: 12345">
+        </div>
+        <div>
+            <label for="sexo">Sexo:</label>
+            <select id="sexo">
+                <option value="M">Masculino</option>
+                <option value="F">Feminino</option>
+                <option value="O">Outro</option>
+            </select>
+        </div>
+        <div>
+            <label for="idade">Idade:</label>
+            <input type="number" id="idade" placeholder="Ex: 34" min="0" max="120">
+        </div>
+    </div>
+
     <div class="field-mb">
-        <label for="beId">Número do BE:</label>
-        <input type="text" id="beId" placeholder="Ex: 12345">
+        <div class="nota">Últimos atendidos (toque para reabrir o caso):</div>
+        <div class="recentes" id="recentes"><span class="chip-vazio">Carregando...</span></div>
     </div>
 
     <div class="field-mb">
         <label for="mensagem">Relato Clínico ou Dúvida:</label>
-        <textarea id="mensagem" placeholder="Paciente 18a, cefaleia unilateral pulsátil..."></textarea>
+        <textarea id="mensagem" placeholder="Paciente com cefaleia unilateral pulsátil há 6h..."></textarea>
+    </div>
+
+    <div class="toggle-upa">
+        <div>
+            <div class="lbl">💉 Medicar na UPA</div>
+            <div class="sub">Desligado = não gera prescrição interna. Ligue só se for medicar na unidade.</div>
+        </div>
+        <label class="switch">
+            <input type="checkbox" id="chkMedicarUpa">
+            <span class="slider"></span>
+        </label>
     </div>
 
     <div class="options-grid">
-        <label><input type="checkbox" id="chkProntuario" checked> 📝 Prontuário</label>
-        <label><input type="checkbox" id="chkAlta"> 🏠 Receita Alta</label>
+        <label><input type="checkbox" id="chkAlta"> 🏠 Receita Domiciliar</label>
         <label><input type="checkbox" id="chkRelatorio"> 📋 Relatório APS</label>
         <label><input type="checkbox" id="chkBuscar"> 🔎 Buscar em fontes (+ lento)</label>
         <label class="correcao-label"><input type="checkbox" id="chkCorrecao"> ⚠️ Apenas Corrigir</label>
     </div>
 
     <div class="loading" id="loading">🧠 Processando raciocínio e documentos...</div>
-    <button id="btnEnviar" class="btn-main" onclick="enviarDados()">🚀 Enviar Entrada</button>
+    <div class="linha-acoes">
+        <button id="btnEnviar" class="btn-main" onclick="enviarDados()">🚀 Enviar Entrada</button>
+        <button class="btn-limpar" onclick="limpar()">🧹 Limpar relato</button>
+    </div>
 </div>
 
 <div class="panel">
-    <h2>💡 Discussão e Documentos</h2>
+    <h2 style="border:none; margin-bottom:14px;">💡 Discussão e Documentos</h2>
 
-    <!-- Discussão -->
     <div class="doc" id="docDiscussao" style="display:block;">
         <div class="doc-head"><h3>💡 Discussão de Retaguarda</h3></div>
         <div id="resDiscussao" class="box box-discussao">Aguardando entrada de dados...</div>
     </div>
 
-    <!-- CID destacado -->
     <div id="cidWrap">
         <div class="doc-head" style="background:transparent; padding:0 0 6px;">
             <h3>🏷️ CID</h3>
@@ -124,31 +193,33 @@
         <div id="resCid"></div>
     </div>
 
-    <!-- Campos do prontuário (separados) -->
+    <!-- Evolução (só aparece no modo evolução) -->
+    <div class="doc" id="docEvolucao">
+        <div class="doc-head"><h3>📄 Evolução</h3>
+            <button class="btn-copiar" onclick="copiar('resEvolucao',this)">Copiar</button></div>
+        <div id="resEvolucao" class="box box-evolucao"></div>
+    </div>
+
     <div id="grupoProntuario"></div>
 
-    <!-- Prescrição interna -->
     <div class="doc" id="docPresc">
         <div class="doc-head"><h3>💉 Prescrição na UPA</h3>
             <button class="btn-copiar" onclick="copiar('resPresc',this)">Copiar</button></div>
         <div id="resPresc" class="box"></div>
     </div>
 
-    <!-- Diluições (só Barreiro) -->
     <div class="doc" id="docDiluicao">
         <div class="doc-head"><h3>💧 Diluições (Barreiro)</h3>
             <button class="btn-copiar" onclick="copiar('resDiluicao',this)">Copiar</button></div>
         <div id="resDiluicao" class="box box-diluicao"></div>
     </div>
 
-    <!-- Receita -->
     <div class="doc" id="docReceita">
         <div class="doc-head"><h3>🏠 Receita Domiciliar</h3>
             <button class="btn-copiar" onclick="copiar('resReceita',this)">Copiar</button></div>
         <div id="resReceita" class="box"></div>
     </div>
 
-    <!-- Relatório -->
     <div class="doc" id="docRelatorio">
         <div class="doc-head"><h3>📋 Relatório APS</h3>
             <button class="btn-copiar" onclick="copiar('resRelatorio',this)">Copiar</button></div>
@@ -157,31 +228,49 @@
 </div>
 
 <script>
-    const API_URL = 'https://prontuario-backend-f1qk.onrender.com/api/atendimento';
+    const BASE_URL = 'https://prontuario-backend-f1qk.onrender.com';
+    const API_URL = BASE_URL + '/api/atendimento';
 
-    // Campos do prontuário, na ordem do SIGRAH. "vital" = quadro separado (não copiável junto).
+    let tipoAtual = 'prontuario';
+
+    // Campos do prontuário, na ordem do SIGRAH. "vital" = quadro separado (sem copiar).
     const CAMPOS_PRONT = [
-        {key:'historia_clinica',  titulo:'01 – História Clínica'},
-        {key:'historia_pregressa',titulo:'02 – História Pregressa'},
-        {key:'sinais_vitais',     titulo:'03 – Sinais Vitais (campos próprios no SIGRAH)', vital:true},
-        {key:'exame_fisico_texto',titulo:'03 – Exame Físico (texto)'},
+        {key:'historia_clinica',   titulo:'01 – História Clínica'},
+        {key:'historia_pregressa', titulo:'02 – História Pregressa'},
+        {key:'sinais_vitais',      titulo:'03 – Sinais Vitais (campos próprios no SIGRAH)', vital:true},
+        {key:'exame_fisico_texto', titulo:'03 – Exame Físico (texto)'},
         {key:'hipotese_diagnostica',titulo:'04 – Hipótese Diagnóstica'},
-        {key:'conduta',           titulo:'06 – Conduta'}
+        {key:'conduta',            titulo:'06 – Conduta'}
     ];
 
-    function ajustarUnidade(){
-        // só visual; o backend decide as diluições.
+    // ---- Tema claro/escuro ----
+    function alternarTema(){
+        const html = document.documentElement;
+        const claro = html.getAttribute('data-tema') === 'claro';
+        html.setAttribute('data-tema', claro ? 'escuro' : 'claro');
+        document.getElementById('btnTema').innerText = claro ? '☀️ Tema claro' : '🌙 Tema escuro';
+    }
+
+    // ---- Tipo Prontuário/Evolução ----
+    function setTipo(t){
+        tipoAtual = t;
+        document.querySelectorAll('#segTipo button').forEach(b=>{
+            b.classList.toggle('ativo', b.dataset.tipo === t);
+        });
+    }
+
+    // ---- Limpar só o relato ----
+    function limpar(){
+        document.getElementById('mensagem').value = '';
+        document.getElementById('mensagem').focus();
     }
 
     function setBox(idDoc, idRes, texto){
         const doc = document.getElementById(idDoc);
         const res = document.getElementById(idRes);
         if(texto && texto.trim() !== ''){
-            res.innerText = texto;
-            doc.style.display = 'block';
-        } else {
-            doc.style.display = 'none';
-        }
+            res.innerText = texto; doc.style.display = 'block';
+        } else { doc.style.display = 'none'; }
     }
 
     function montarProntuario(pront){
@@ -194,19 +283,65 @@
             const idRes = 'pront_'+i;
             const ehVital = c.vital === true;
             const div = document.createElement('div');
-            div.className = 'doc';
-            div.style.display = 'block';
-            // quadro de vitais NÃO tem botão de copiar (já tem campo próprio no sistema)
-            const botao = ehVital ? '' :
-                `<button class="btn-copiar" onclick="copiar('${idRes}',this)">Copiar</button>`;
+            div.className = 'doc'; div.style.display = 'block';
+            const botao = ehVital ? '' : '<button class="btn-copiar" onclick="copiar(\''+idRes+'\',this)">Copiar</button>';
             const classeBox = ehVital ? 'box box-vitais' : 'box';
             const nota = ehVital ? '<div class="nota">Digite estes valores nos campos próprios do SIGRAH — não copie junto do exame físico.</div>' : '';
-            div.innerHTML =
-                `<div class="doc-head"><h3>${c.titulo}</h3>${botao}</div>
-                 <div id="${idRes}" class="${classeBox}"></div>${nota}`;
+            div.innerHTML = '<div class="doc-head"><h3>'+c.titulo+'</h3>'+botao+'</div><div id="'+idRes+'" class="'+classeBox+'"></div>'+nota;
             grupo.appendChild(div);
             document.getElementById(idRes).innerText = val.trim();
         });
+    }
+
+    function exibirResposta(data){
+        document.getElementById('resDiscussao').innerText = data.discussao || 'Nenhuma discussão gerada.';
+        setBox('cidWrap','resCid', data.cid);
+        document.getElementById('cidWrap').style.display = (data.cid && data.cid.trim()) ? 'block':'none';
+        setBox('docEvolucao','resEvolucao', data.evolucao);
+        montarProntuario(data.prontuario);
+        setBox('docPresc','resPresc', data.prescricao_interna);
+        setBox('docDiluicao','resDiluicao', data.diluicoes);
+        setBox('docReceita','resReceita', data.receita);
+        setBox('docRelatorio','resRelatorio', data.relatorio);
+    }
+
+    // ---- Lista de recentes (vinda do servidor: só BE + sexo + idade) ----
+    function rotuloSexo(s){ return s==='M'?'M':s==='F'?'F':'O'; }
+
+    async function carregarRecentes(){
+        const wrap = document.getElementById('recentes');
+        try{
+            const resp = await fetch(BASE_URL + '/api/recentes');
+            const data = await resp.json();
+            const lista = (data.recentes||[]);
+            if(lista.length === 0){ wrap.innerHTML = '<span class="chip-vazio">Nenhum atendimento recente.</span>'; return; }
+            wrap.innerHTML = '';
+            lista.forEach(p=>{
+                const idadeTxt = (p.idade!==''&&p.idade!=null) ? p.idade+'a' : '?';
+                const c = document.createElement('span');
+                c.className = 'chip-be';
+                c.innerText = p.be + ' · ' + rotuloSexo(p.sexo) + ' · ' + idadeTxt;
+                c.onclick = ()=> reabrirCaso(p.be, p.sexo, p.idade);
+                wrap.appendChild(c);
+            });
+        }catch(e){
+            wrap.innerHTML = '<span class="chip-vazio">Não foi possível carregar os recentes.</span>';
+        }
+    }
+
+    async function reabrirCaso(be, sexo, idade){
+        document.getElementById('beId').value = be;
+        if(sexo) document.getElementById('sexo').value = sexo;
+        if(idade!=='' && idade!=null) document.getElementById('idade').value = idade;
+        document.getElementById('resDiscussao').innerText = 'Buscando caso anterior...';
+        try{
+            const resp = await fetch(BASE_URL + '/api/historico/' + encodeURIComponent(be));
+            const data = await resp.json();
+            if(data.erro){ document.getElementById('resDiscussao').innerText = data.erro; return; }
+            if(data.resposta) exibirResposta(data.resposta);
+        }catch(e){
+            document.getElementById('resDiscussao').innerText = 'Erro ao buscar o caso anterior.';
+        }
     }
 
     async function enviarDados(){
@@ -214,13 +349,16 @@
         const mensagem = document.getElementById('mensagem').value;
         const unidade = document.getElementById('unidade').value;
         const modeloId = document.getElementById('modeloIA').value;
+        const sexo = document.getElementById('sexo').value;
+        const idade = document.getElementById('idade').value;
         const btn = document.getElementById('btnEnviar');
         const opcoes = {
-            prontuario: document.getElementById('chkProntuario').checked,
+            prontuario: tipoAtual === 'prontuario',
             alta: document.getElementById('chkAlta').checked,
             relatorio: document.getElementById('chkRelatorio').checked,
             correcao: document.getElementById('chkCorrecao').checked,
-            buscarFontes: document.getElementById('chkBuscar').checked
+            buscarFontes: document.getElementById('chkBuscar').checked,
+            medicarUpa: document.getElementById('chkMedicarUpa').checked
         };
         if(!beId || !mensagem){ alert('Preencha o Número do BE e o Relato.'); return; }
 
@@ -230,8 +368,7 @@
             : '🧠 Processando raciocínio e documentos...';
         document.getElementById('loading').style.display = 'block';
         document.getElementById('resDiscussao').innerText = 'Analisando caso...';
-        // esconde tudo
-        ['docPresc','docDiluicao','docReceita','docRelatorio','cidWrap'].forEach(id=>{
+        ['docPresc','docDiluicao','docReceita','docRelatorio','cidWrap','docEvolucao'].forEach(id=>{
             document.getElementById(id).style.display='none';
         });
         document.getElementById('grupoProntuario').innerHTML='';
@@ -240,23 +377,11 @@
             const resp = await fetch(API_URL,{
                 method:'POST',
                 headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({beId,mensagem,unidade,opcoes,modeloId})
+                body: JSON.stringify({beId,mensagem,unidade,opcoes,modeloId,sexo,idade,tipoDocumento:tipoAtual})
             });
             const data = await resp.json();
             if(data.erro){ alert('Erro: '+data.erro); }
-            else{
-                document.getElementById('resDiscussao').innerText = data.discussao || 'Nenhuma discussão gerada.';
-                // CID destacado
-                setBox('cidWrap','resCid', data.cid);
-                document.getElementById('cidWrap').style.display = (data.cid && data.cid.trim()) ? 'block':'none';
-                // prontuário em campos separados
-                montarProntuario(data.prontuario);
-                // demais documentos
-                setBox('docPresc','resPresc', data.prescricao_interna);
-                setBox('docDiluicao','resDiluicao', data.diluicoes);
-                setBox('docReceita','resReceita', data.receita);
-                setBox('docRelatorio','resRelatorio', data.relatorio);
-            }
+            else{ exibirResposta(data); carregarRecentes(); }
         }catch(e){
             alert('Erro de conexão com o servidor.');
         }finally{
@@ -283,9 +408,12 @@
     function efeito(btn){
         if(!btn) return;
         const orig=btn.innerText;
-        btn.innerText='✓ Copiado!'; btn.style.background='#4caf50'; btn.style.color='#fff';
-        setTimeout(()=>{btn.innerText=orig; btn.style.background='#333'; btn.style.color='#4caf50';},1500);
+        btn.innerText='✓ Copiado!'; btn.style.background='var(--verde)'; btn.style.color='#fff';
+        setTimeout(()=>{btn.innerText=orig; btn.style.background='transparent'; btn.style.color='var(--verde)';},1500);
     }
+
+    // Carrega os recentes ao abrir.
+    carregarRecentes();
 </script>
 </body>
 </html>
