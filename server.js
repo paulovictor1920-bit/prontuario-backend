@@ -183,7 +183,7 @@ function montarDiluicoes(textoPrescricao) {
 // ----------------------------------------------------------------------------
 app.post('/api/atendimento', limitarAbuso, async (req, res) => {
     try {
-        const { beId, mensagem, unidade, opcoes, modeloId } = req.body;
+        const { beId, mensagem, unidade, opcoes, modeloId, sexo, idade, tipoDocumento } = req.body;
 
         if (!beId || !mensagem) {
             return res.status(400).json({ erro: 'Número do BE e relato são obrigatórios.' });
@@ -192,6 +192,14 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
             return res.status(400).json({ erro: 'Unidade inválida.' });
         }
         const op = opcoes || { prontuario: true, alta: false, relatorio: false, correcao: false };
+
+        // NOVO: tipo de documento escolhido pelo médico (não mais adivinhado).
+        //   'evolucao' = texto curto + conduta.  Qualquer outro valor = prontuário completo.
+        const ehEvolucao = tipoDocumento === 'evolucao';
+
+        // NOVO: o médico decide se haverá medicação NA UPA (toggle). Desligado por
+        //   padrão: a IA NÃO deve criar prescrição interna se isto vier falso.
+        const medicarUpa = op.medicarUpa === true;
 
         // Ponto 2: o médico pode ligar a "busca em fontes confiáveis" caso a caso.
         const usarBusca = op.buscarFontes === true;
@@ -208,10 +216,15 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
         const model = genAI.getGenerativeModel(configModelo);
 
         let historicoPaciente = patientCache.get(beId) || [];
-        let tipoAtendimento = historicoPaciente.length > 0
-            ? 'EVOLUÇÃO (Retorno com exames/reavaliação)'
-            : 'ADMISSÃO (Primeiro Contato)';
+        // O tipo agora é decidido pelo médico (botão), não mais adivinhado pelo histórico.
+        let tipoAtendimento = ehEvolucao
+            ? 'EVOLUÇÃO (reavaliação — texto curto + conduta)'
+            : 'PRONTUÁRIO (documento completo)';
         if (historicoPaciente.length > 0) patientCache.ttl(beId, TEMPO_HISTORICO);
+
+        // Dados demográficos para a IA contextualizar (não identificam o paciente).
+        const idadeTxt = (idade !== undefined && idade !== null && String(idade).trim() !== '') ? `${idade} anos` : 'não informada';
+        const sexoTxt = sexo === 'M' ? 'masculino' : sexo === 'F' ? 'feminino' : sexo === 'O' ? 'outro' : 'não informado';
 
         const listaUnidade = unidade === 'BARREIRO' ? medicamentosBarreiro : medicamentosAcrizioMenezes;
         const tituloFarmacia = unidade === 'BARREIRO'
@@ -224,8 +237,17 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
         if (op.correcao) {
             instrucoesAcao = '⚠️ MODO CORREÇÃO: reescreva aplicando a correção apontada.\n\n';
         }
-        if (op.prontuario) instrucoesAcao += '- PRONTUÁRIO e PRESCRIÇÃO INTERNA.\n';
-        if (op.alta) instrucoesAcao += '- RECEITA DE ALTA.\n';
+        if (ehEvolucao) {
+            instrucoesAcao += '- EVOLUÇÃO (texto curto, no campo "evolucao") + CONDUTA. NÃO preencha os campos de prontuário de admissão (história clínica, pregressa, exame físico, hipótese), a menos que o médico tenha descrito explicitamente um novo achado para eles.\n';
+        } else if (op.prontuario) {
+            instrucoesAcao += '- PRONTUÁRIO completo (todos os campos do SIGRAH).\n';
+        }
+        if (medicarUpa) {
+            instrucoesAcao += '- PRESCRIÇÃO INTERNA (medicações a fazer NA UPA).\n';
+        } else {
+            instrucoesAcao += '- NÃO gere prescrição interna: deixe "prescricao_interna" VAZIA. Não houve medicação na unidade, a menos que o próprio relato do médico já descreva uma medicação como JÁ administrada.\n';
+        }
+        if (op.alta) instrucoesAcao += '- RECEITA DOMICILIAR.\n';
         if (op.relatorio) instrucoesAcao += '- RELATÓRIO APS.\n';
 
         // Ponto 2: bloco de fontes confiáveis (só entra no prompt se busca ligada).
@@ -257,6 +279,18 @@ e prossiga com conhecimento geral, sinalizando que não houve fonte confirmada.
         const promptFinal = `Você é um médico assistente de retaguarda em uma UPA.
 UNIDADE: ${unidade}
 TIPO DE ATENDIMENTO: ${tipoAtendimento}
+SEXO: ${sexoTxt} | IDADE: ${idadeTxt}
+
+REGRA ABSOLUTA DE FIDELIDADE AO RELATO:
+- NUNCA invente sinais vitais. Se o médico não informou um valor (SpO2, FC, FR,
+  PA, temperatura, peso), DEIXE-O EM BRANCO. É proibido preencher com valores
+  "normais" presumidos.
+- NUNCA invente medicação na UPA. Só descreva administração na unidade se o
+  médico solicitou OU se o relato diz que já foi feita.
+- Respeite literalmente o que o médico pediu, trocou ou proibiu na receita
+  domiciliar. Se ele disse "não trocar" ou "manter", mantenha exatamente.
+- Não invente comorbidades, alergias ou achados de exame não relatados. Quando
+  um dado não foi informado, registre como "não informado" ou deixe em branco.
 
 ${contextoFarmacologico}
 ${blocoFontes}
@@ -264,6 +298,7 @@ REGRAS DE SAÍDA (responda em JSON puro com EXATAMENTE estas chaves):
 {
   "discussao": "",
   "cid": "",
+  "evolucao": "",
   "prontuario": {
      "historia_clinica": "",
      "historia_pregressa": "",
@@ -293,6 +328,14 @@ INSTRUÇÕES DE CADA CAMPO:
 2. "cid": APENAS o(s) código(s) CID e descrição. Ex: "J00 - Nasofaringite aguda".
    Nada além disso neste campo.
 
+2b. "evolucao": preencha SOMENTE quando o tipo de atendimento for EVOLUÇÃO.
+   Texto curto e corrido (no máximo ~10 linhas), assertivo, descrevendo a
+   reavaliação: resposta à conduta inicial, mudanças no quadro, estado atual e
+   se há ou não sinais de alerta. NÃO repita a história clínica de admissão.
+   Quando for EVOLUÇÃO, deixe os subcampos do "prontuario" VAZIOS (exceto
+   "conduta", que deve ser preenchida). Quando NÃO for evolução, deixe
+   "evolucao" como "".
+
 3. "prontuario" — preencha cada subcampo SEPARADAMENTE para encaixar no SIGRAH.
    IMPORTANTE: o prontuário é DOCUMENTO DESCRITIVO E ASSERTIVO, não de reflexão.
    NUNCA escreva incertezas, dúvidas ou "pode ser/não descartado" aqui. No
@@ -315,18 +358,25 @@ AD: plano, flácido, RHA presentes, indolor à palpação, sem massas ou viscero
 Neurológico: ECG 15, pupilas isocóricas e fotorreagentes, pares cranianos preservados, força e sensibilidade preservadas e simétricas nos 4 membros, sem sinais de irritação meníngea"
      (campo 03 - parte textual)
    - "sinais_vitais": só os números, no formato "SpO2: __ | FC: __ | FR: __ |
-     PA: __ | Tax: __ °C | Peso: __ kg". Se algum não foi informado, deixe em
-     branco após os dois-pontos. (vai num quadro separado, NÃO copiado junto)
+     PA: __ | Tax: __ °C | Peso: __ kg". REGRA CRÍTICA: preencha APENAS os
+     valores que o médico informou explicitamente no relato. Para todo valor
+     NÃO informado, deixe em BRANCO após os dois-pontos (ex: "PA: |"). É
+     TERMINANTEMENTE PROIBIDO inventar, estimar ou presumir valores "normais".
+     (vai num quadro separado, NÃO copiado junto)
    - "hipotese_diagnostica": a(s) hipótese(s) em texto. (campo 04)
-   - "conduta": condutas tomadas e orientações. FORMATO OBRIGATÓRIO: comece com
-     "CD:" sozinho na primeira linha, depois ITENS COM HÍFEN, um por linha
-     (quebra real \\n). AGRUPE ações relacionadas no mesmo item em vez de
-     fragmentar; mire em 4 a 6 itens. MANTENHA doses e posologia. MODELO:
+   - "conduta": condutas e orientações. SEJA CONCISO — nada de "encher
+     linguiça". FORMATO OBRIGATÓRIO: comece com "CD:" sozinho na primeira
+     linha, depois ITENS COM HÍFEN, um por linha (quebra real \\n). Mire em
+     3 a 5 itens curtos e objetivos; agrupe ações relacionadas no mesmo item.
+     REGRA OBRIGATÓRIA: sempre que houver medicação, CITE-A NOMINALMENTE com
+     dose, via e frequência — tanto a feita na UPA quanto a da receita
+     domiciliar (não escreva apenas "medicação sintomática" ou "receita
+     entregue" sem nomear os fármacos). MODELO:
      "CD:
-- Medicação sintomática na unidade: Tenoxicam 20 mg IM + Dipirona 1 g (40 gotas) VO, e repouso em ambiente calmo.
-- Reavaliação clínica após o efeito; se melhora completa, alta com orientações de sinais de alerta (piora súbita, febre, alteração visual ou motora).
-- Entrega de receita domiciliar (Sumatriptano, Naproxeno, Metoclopramida).
-- Atestado de 1 dia e encaminhamento para acompanhamento na APS."
+- Sintomático na UPA: Tenoxicam 20 mg IM + Dipirona 1 g (2 mL) EV, agora.
+- Reavaliação após o efeito; se melhora, alta com sinais de alerta (piora súbita, febre, déficit).
+- Receita domiciliar: Naproxeno 500 mg 12/12h por 5 dias e Metoclopramida 10 mg se náusea.
+- Encaminhamento para acompanhamento na APS."
      (campo 06)
 
 4. "prescricao_interna": medicações usadas NA UPA. APENAS itens da lista desta
@@ -338,8 +388,19 @@ Neurológico: ECG 15, pupilas isocóricas e fotorreagentes, pares cranianos pres
 2. Tenoxicam 20 mg IM agora.
 3. SF 0,9% 500 mL EV se necessário."
 
-5. "receita": receita domiciliar agrupada por via (USO ORAL, USO TÓPICO...).
-   Sem textos burocráticos sobre falta de medicação.
+5. "receita": receita de uso DOMICILIAR, agrupada por via (USO ORAL, USO
+   TÓPICO, USO INALATÓRIO...). FORMATO CONSAGRADO OBRIGATÓRIO para CADA item:
+   primeiro o nome + concentração, depois a QUANTIDADE TOTAL a dispensar
+   (nº de comprimidos, caixa(s), frasco(s), tubo(s)), e SÓ ENTÃO a posologia
+   na linha de baixo. NUNCA pule a quantidade total. MODELO:
+   "USO ORAL
+1. Naproxeno 500 mg ............................. 10 comprimidos
+   Tomar 1 comprimido de 12/12 horas por 5 dias.
+
+2. Metoclopramida 10 mg ......................... 1 caixa
+   Tomar 1 comprimido até 3x ao dia se náusea."
+   Respeite LITERALMENTE o que o médico pediu/proibiu/trocou no relato. Sem
+   textos burocráticos sobre falta de medicação.
 
 6. "relatorio": parágrafo único, de médico para médico, começando com
    "Colega, paciente avaliado nesta UPA por...".
@@ -399,6 +460,7 @@ ${mensagem}`;
 
         // Garante que a estrutura do prontuário existe (evita quebrar o front).
         if (!dados.prontuario) dados.prontuario = {};
+        if (typeof dados.evolucao !== 'string') dados.evolucao = '';
 
         // --- Rede de segurança farmacológica ---
         const textoConferir = [dados.prescricao_interna, dados.receita].filter(Boolean).join('\n');
@@ -427,8 +489,13 @@ ${mensagem}`;
                 + '\n\n📚 FONTES CONSULTADAS:\n' + dados.fontes.trim();
         }
 
-        // Salva no histórico.
-        historicoPaciente.push({ medico: mensagem, comandos: op, resposta: dados });
+        // Salva no histórico (guarda também sexo/idade/tipo p/ reabrir o caso).
+        historicoPaciente.push({
+            medico: mensagem, comandos: op, resposta: dados,
+            sexo: sexo || '', idade: (idade !== undefined ? idade : ''),
+            tipo: ehEvolucao ? 'evolucao' : 'prontuario',
+            quando: Date.now()
+        });
         patientCache.set(beId, historicoPaciente);
 
         res.json(dados);
@@ -437,6 +504,42 @@ ${mensagem}`;
         console.error('Erro no processamento:', error);
         res.status(500).json({ erro: 'Falha no processamento. Tente novamente.' });
     }
+});
+
+// ----------------------------------------------------------------------------
+//  ROTA: reabrir um caso pelo BE (clique no chip de recentes).
+//  Devolve a ÚLTIMA resposta salva no cache (72h) para aquele BE.
+// ----------------------------------------------------------------------------
+app.get('/api/historico/:beId', (req, res) => {
+    const hist = patientCache.get(req.params.beId);
+    if (!hist || hist.length === 0) {
+        return res.status(404).json({ erro: 'Sem histórico para este BE (pode ter expirado em 72h).' });
+    }
+    const ultimo = hist[hist.length - 1];
+    res.json({
+        beId: req.params.beId,
+        sexo: ultimo.sexo || '',
+        idade: ultimo.idade || '',
+        tipo: ultimo.tipo || 'prontuario',
+        resposta: ultimo.resposta || {}
+    });
+});
+
+// ----------------------------------------------------------------------------
+//  ROTA: lista dos BEs recentes (só número + sexo + idade — sem dado clínico).
+//  Usada para montar os "chips" na tela, sincronizados entre aparelhos.
+// ----------------------------------------------------------------------------
+app.get('/api/recentes', (req, res) => {
+    const lista = [];
+    patientCache.keys().forEach(be => {
+        const hist = patientCache.get(be);
+        if (hist && hist.length > 0) {
+            const u = hist[hist.length - 1];
+            lista.push({ be, sexo: u.sexo || '', idade: u.idade || '', quando: u.quando || 0 });
+        }
+    });
+    lista.sort((a, b) => (b.quando || 0) - (a.quando || 0));
+    res.json({ recentes: lista.slice(0, 8) });
 });
 
 app.get('/', (req, res) => res.send('Servidor do Prontuário Rápido (v3) no ar.'));
