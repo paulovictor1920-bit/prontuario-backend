@@ -13,6 +13,7 @@
 const express = require('express');
 const cors = require('cors');
 const NodeCache = require('node-cache');
+const Redis = require('ioredis');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const { medicamentosAcrizioMenezes, medicamentosBarreiro } = require('./farmacia');
@@ -50,9 +51,83 @@ if (!process.env.GEMINI_API_KEY) {
 }
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const patientCache = new NodeCache({ stdTTL: TEMPO_HISTORICO, checkperiod: 3600 });
+
+// ----------------------------------------------------------------------------
+//  HISTÓRICO PERSISTENTE (Redis / Upstash)
+// ----------------------------------------------------------------------------
+//  Antes o histórico ficava só na MEMÓRIA do Render (node-cache) e SUMIA quando
+//  o servidor hibernava. Agora fica num Redis externo (Upstash, gratuito), que
+//  NÃO morre quando o Render dorme. As 72h continuam valendo: o Redis expira
+//  cada BE sozinho (TTL). Guardamos só BE + sexo + idade + atendimento — NUNCA
+//  o nome do paciente (LGPD), igual antes.
+//
+//  RESILIÊNCIA: se o Redis estiver fora do ar ou sem senha configurada, o
+//  atendimento NÃO quebra — o documento é gerado e entregue normalmente; apenas
+//  o salvamento/leitura do histórico fica indisponível. Gerar o documento no
+//  plantão é mais importante que guardar o histórico.
+//
+//  A senha de conexão vem da variável de ambiente REDIS_URL (configurada no
+//  Render, igual à GEMINI_API_KEY). Nunca fica escrita no código.
+let redis = null;
+let redisOk = false;
+if (process.env.REDIS_URL) {
+    try {
+        redis = new Redis(process.env.REDIS_URL, {
+            // Não deixa o app travar tentando reconectar pra sempre.
+            maxRetriesPerRequest: 2,
+            connectTimeout: 4000,
+            lazyConnect: false,
+        });
+        redis.on('ready', () => { redisOk = true; console.log('Redis (histórico) conectado.'); });
+        redis.on('error', (e) => { redisOk = false; console.error('Redis indisponível:', e.message); });
+    } catch (e) {
+        console.error('Falha ao iniciar Redis:', e.message);
+        redis = null;
+    }
+} else {
+    console.error('ATENÇÃO: REDIS_URL não configurada. O histórico (reabrir BE / linha do tempo / recentes) ficará indisponível até configurar.');
+}
+
+const CHAVE_RECENTES = 'recentes'; // sorted set: score = timestamp, membro = BE
+
+// Lê a pilha de atendimentos de um BE. Retorna [] se não houver ou se o Redis
+// estiver fora (degradação elegante).
+async function lerHistorico(beId) {
+    if (!redis) return [];
+    try {
+        const txt = await redis.get('be:' + beId);
+        return txt ? JSON.parse(txt) : [];
+    } catch (e) {
+        console.error('Erro ao ler histórico do Redis:', e.message);
+        return [];
+    }
+}
+
+// Grava a pilha de um BE, renova as 72h e atualiza a lista de recentes.
+// Guarda nos recentes só metadados leves (BE/sexo/idade/quando) — sem clínica.
+async function salvarHistorico(beId, pilha, sexo, idade, quando) {
+    if (!redis) return false;
+    try {
+        const ts = quando || Date.now();
+        await redis.set('be:' + beId, JSON.stringify(pilha), 'EX', TEMPO_HISTORICO);
+        // O MEMBRO do sorted set é só o BE (único): regravar o mesmo BE atualiza
+        // o score (sobe ao topo) sem duplicar. Os metadados leves (sexo/idade)
+        // ficam num hash à parte, também com 72h de validade.
+        await redis.zadd(CHAVE_RECENTES, ts, String(beId));
+        await redis.set('meta:' + beId,
+            JSON.stringify({ sexo: sexo || '', idade: (idade !== undefined ? idade : '') }),
+            'EX', TEMPO_HISTORICO);
+        // Mantém a lista de recentes enxuta (últimos 50; a tela mostra 8).
+        await redis.zremrangebyrank(CHAVE_RECENTES, 0, -51);
+        return true;
+    } catch (e) {
+        console.error('Erro ao salvar histórico no Redis:', e.message);
+        return false;
+    }
+}
 
 // Trava simples anti-abuso (pedidos por minuto por IP).
+// Continua em memória local: pode ser volátil sem problema.
 const contadorPedidos = new NodeCache({ stdTTL: 60, checkperiod: 30 });
 const LIMITE_POR_MINUTO = 20;
 function limitarAbuso(req, res, next) {
@@ -221,12 +296,11 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
         }
         const model = genAI.getGenerativeModel(configModelo);
 
-        let historicoPaciente = patientCache.get(beId) || [];
+        let historicoPaciente = await lerHistorico(beId);
         // O tipo agora é decidido pelo médico (botão), não mais adivinhado pelo histórico.
         let tipoAtendimento = ehEvolucao
             ? 'EVOLUÇÃO (reavaliação — texto curto + conduta)'
             : 'PRONTUÁRIO (documento completo)';
-        if (historicoPaciente.length > 0) patientCache.ttl(beId, TEMPO_HISTORICO);
 
         // Dados demográficos para a IA contextualizar (não identificam o paciente).
         const idadeTxt = (idade !== undefined && idade !== null && String(idade).trim() !== '') ? `${idade} anos` : 'não informada';
@@ -553,13 +627,17 @@ ${mensagem}`;
         }
 
         // Salva no histórico (guarda também sexo/idade/tipo p/ reabrir o caso).
+        const quando = Date.now();
         historicoPaciente.push({
             medico: mensagem, comandos: op, resposta: dados,
             sexo: sexo || '', idade: (idade !== undefined ? idade : ''),
             tipo: ehEvolucao ? 'evolucao' : 'prontuario',
-            quando: Date.now()
+            quando: quando
         });
-        patientCache.set(beId, historicoPaciente);
+        const salvou = await salvarHistorico(beId, historicoPaciente, sexo, idade, quando);
+        // Avisa a tela se o histórico foi gravado (para mostrar "✓ salvo")
+        // ou não (para o médico saber que reabrir esse BE pode não funcionar).
+        dados._historicoSalvo = salvou;
 
         res.json(dados);
 
@@ -573,8 +651,8 @@ ${mensagem}`;
 //  ROTA: reabrir um caso pelo BE (clique no chip de recentes).
 //  Devolve a ÚLTIMA resposta salva no cache (72h) para aquele BE.
 // ----------------------------------------------------------------------------
-app.get('/api/historico/:beId', (req, res) => {
-    const hist = patientCache.get(req.params.beId);
+app.get('/api/historico/:beId', async (req, res) => {
+    const hist = await lerHistorico(req.params.beId);
     if (!hist || hist.length === 0) {
         return res.status(404).json({ erro: 'Sem histórico para este BE (pode ter expirado em 72h).' });
     }
@@ -593,8 +671,8 @@ app.get('/api/historico/:beId', (req, res) => {
 //  Devolve a pilha inteira (prontuário, correções, evoluções) em ordem, para
 //  o médico clicar e ver qualquer etapa. NÃO guarda nome do paciente (LGPD).
 // ----------------------------------------------------------------------------
-app.get('/api/timeline/:beId', (req, res) => {
-    const hist = patientCache.get(req.params.beId);
+app.get('/api/timeline/:beId', async (req, res) => {
+    const hist = await lerHistorico(req.params.beId);
     if (!hist || hist.length === 0) {
         return res.status(404).json({ erro: 'Sem histórico para este BE (pode ter expirado em 72h).' });
     }
@@ -618,17 +696,36 @@ app.get('/api/timeline/:beId', (req, res) => {
 //  ROTA: lista dos BEs recentes (só número + sexo + idade — sem dado clínico).
 //  Usada para montar os "chips" na tela, sincronizados entre aparelhos.
 // ----------------------------------------------------------------------------
-app.get('/api/recentes', (req, res) => {
-    const lista = [];
-    patientCache.keys().forEach(be => {
-        const hist = patientCache.get(be);
-        if (hist && hist.length > 0) {
-            const u = hist[hist.length - 1];
-            lista.push({ be, sexo: u.sexo || '', idade: u.idade || '', quando: u.quando || 0 });
+app.get('/api/recentes', async (req, res) => {
+    if (!redis) return res.json({ recentes: [] });
+    try {
+        // Pega os BEs mais recentes do sorted set, já com o score (timestamp).
+        // Buscamos um pouco mais que 8 porque alguns podem já ter expirado.
+        const pares = await redis.zrevrange(CHAVE_RECENTES, 0, 29, 'WITHSCORES');
+        const lista = [];
+        for (let i = 0; i < pares.length; i += 2) {
+            const be = pares[i];
+            const quando = Number(pares[i + 1]) || 0;
+            // Só inclui se o BE ainda existe (não expirou nas 72h).
+            const existe = await redis.exists('be:' + be);
+            if (!existe) {
+                // Limpa resíduos para não acumular lixo no sorted set.
+                redis.zrem(CHAVE_RECENTES, be);
+                continue;
+            }
+            let sexo = '', idade = '';
+            try {
+                const m = await redis.get('meta:' + be);
+                if (m) { const o = JSON.parse(m); sexo = o.sexo || ''; idade = o.idade || ''; }
+            } catch (e) { /* metadado opcional */ }
+            lista.push({ be, sexo, idade, quando });
+            if (lista.length >= 8) break;
         }
-    });
-    lista.sort((a, b) => (b.quando || 0) - (a.quando || 0));
-    res.json({ recentes: lista.slice(0, 8) });
+        res.json({ recentes: lista });
+    } catch (e) {
+        console.error('Erro ao ler recentes do Redis:', e.message);
+        res.json({ recentes: [] });
+    }
 });
 
 app.get('/', (req, res) => res.send('Servidor do Prontuário Rápido (v3) no ar.'));
