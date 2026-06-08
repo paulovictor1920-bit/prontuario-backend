@@ -79,6 +79,10 @@
         border-radius:20px; cursor:pointer; font-size:13px; font-weight:bold; transition:.15s;}
     .chip-be:hover{background:var(--azul); color:#fff;}
     .chip-vazio{color:var(--nota); font-size:12px; font-style:italic;}
+    .chip-etapa{background:var(--box); border:1px solid var(--nota); color:var(--texto); padding:6px 12px;
+        border-radius:20px; cursor:pointer; font-size:13px; transition:.15s;}
+    .chip-etapa:hover{border-color:var(--azul); color:var(--azul);}
+    .chip-etapa.ativa{background:var(--azul); color:#fff; border-color:var(--azul); font-weight:bold;}
     .doc{display:none; margin-bottom:14px; border:1px solid var(--line); border-radius:8px; overflow:hidden;}
     .doc-head{display:flex; justify-content:space-between; align-items:center; background:var(--box); padding:8px 12px;}
     .doc-head h3{margin:0;}
@@ -152,6 +156,11 @@
     <div class="field-mb">
         <div class="nota">Últimos atendidos (toque para reabrir o caso):</div>
         <div class="recentes" id="recentes"><span class="chip-vazio">Carregando...</span></div>
+    </div>
+
+    <div class="field-mb" id="timelineWrap" style="display:none;">
+        <div class="nota">Linha do tempo deste BE (toque para ver cada etapa):</div>
+        <div class="recentes" id="timeline"></div>
     </div>
 
     <div class="field-mb">
@@ -283,7 +292,7 @@
         {key:'sinais_vitais',      titulo:'03 – Sinais Vitais (campos próprios no SIGRAH)', vital:true, tituloCopia:'SINAIS VITAIS'},
         {key:'exame_fisico_texto', titulo:'03 – Exame Físico (texto)',                      tituloCopia:'EXAME FÍSICO'},
         {key:'hipotese_diagnostica',titulo:'04 – Hipótese Diagnóstica',                     tituloCopia:'HIPÓTESE DIAGNÓSTICA'},
-        {key:'conduta',            titulo:'06 – Conduta',                                   tituloCopia:'CONDUTA'}
+        {key:'conduta',            titulo:'06 – Condutas',                                  tituloCopia:'CONDUTAS'}
     ];
 
     // ---- Tema claro/escuro ----
@@ -375,20 +384,68 @@
         }
     }
 
+    // ---- Reabrir um BE: busca a LINHA DO TEMPO (todas as etapas das 72h) ----
+    // Usado tanto pelo clique no chip quanto ao digitar o número e sair do campo.
+    function rotuloEtapa(et){
+        const d = et.quando ? new Date(et.quando) : null;
+        const hora = d ? d.toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}) : '';
+        let nome = et.tipo === 'evolucao' ? 'Evolução' : 'Prontuário';
+        if(et.correcao) nome = 'Correção';
+        return nome + (hora ? ' · ' + hora : '');
+    }
+
     async function reabrirCaso(be, sexo, idade){
+        if(!be){ return; }
         document.getElementById('beId').value = be;
         if(sexo) document.getElementById('sexo').value = sexo;
-        if(idade!=='' && idade!=null) document.getElementById('idade').value = idade;
+        if(idade!=='' && idade!=null && idade!==undefined) document.getElementById('idade').value = idade;
+        const wrapTimeline = document.getElementById('timelineWrap');
+        const elTl = document.getElementById('timeline');
         document.getElementById('resDiscussao').innerText = 'Buscando caso anterior...';
+        wrapTimeline.style.display = 'none';
         try{
-            const resp = await fetch(BASE_URL + '/api/historico/' + encodeURIComponent(be));
+            const resp = await fetch(BASE_URL + '/api/timeline/' + encodeURIComponent(be));
             const data = await resp.json();
             if(data.erro){ document.getElementById('resDiscussao').innerText = data.erro; return; }
-            if(data.resposta) exibirResposta(data.resposta);
+            const etapas = data.etapas || [];
+            if(etapas.length === 0){ document.getElementById('resDiscussao').innerText = 'Sem histórico para este BE.'; return; }
+            if(data.sexo) document.getElementById('sexo').value = data.sexo;
+            if(data.idade!=='' && data.idade!=null) document.getElementById('idade').value = data.idade;
+
+            // Monta os botões da linha do tempo (só se houver mais de uma etapa
+            // vale a pena mostrar; com uma só, mostramos direto).
+            elTl.innerHTML = '';
+            etapas.forEach((et, idx)=>{
+                const b = document.createElement('button');
+                b.className = 'chip-etapa';
+                b.innerText = rotuloEtapa(et);
+                b.onclick = ()=>{
+                    document.querySelectorAll('#timeline .chip-etapa').forEach(x=>x.classList.remove('ativa'));
+                    b.classList.add('ativa');
+                    exibirResposta(et.resposta);
+                };
+                elTl.appendChild(b);
+            });
+            wrapTimeline.style.display = etapas.length > 1 ? 'block' : 'none';
+
+            // Abre direto a última etapa (e marca o botão correspondente).
+            exibirResposta(etapas[etapas.length-1].resposta);
+            const botoes = elTl.querySelectorAll('.chip-etapa');
+            if(botoes.length){ botoes[botoes.length-1].classList.add('ativa'); }
         }catch(e){
             document.getElementById('resDiscussao').innerText = 'Erro ao buscar o caso anterior.';
         }
     }
+
+    // Ao sair do campo do BE (ou apertar Enter), tenta reabrir o caso digitado.
+    function tentarReabrirPeloCampo(){
+        const be = document.getElementById('beId').value.trim();
+        if(be){ reabrirCaso(be); }
+    }
+    document.getElementById('beId').addEventListener('change', tentarReabrirPeloCampo);
+    document.getElementById('beId').addEventListener('keydown', function(e){
+        if(e.key === 'Enter'){ e.preventDefault(); tentarReabrirPeloCampo(); }
+    });
 
     async function enviarDados(){
         const beId = document.getElementById('beId').value;
@@ -421,6 +478,7 @@
         });
         document.getElementById('grupoProntuario').innerHTML='';
         document.getElementById('btnCopiarTudo').style.display='none';
+        document.getElementById('timelineWrap').style.display='none';
 
         try{
             const resp = await fetch(API_URL,{
@@ -463,7 +521,7 @@
 
     // ---- Copiar prontuário inteiro (SÓ Acrízio: junta os 6 campos numa tacada) ----
     // Junta História Clínica, História Pregressa, Sinais Vitais, Exame Físico,
-    // Hipótese e Conduta — na ordem do SIGRAH — separados por uma linha.
+    // Hipótese e Condutas — na ordem do SIGRAH — separados por uma linha em branco.
     // NÃO inclui prescrição, diluição, receita, relatório nem exames.
     function copiarProntuarioInteiro(btn){
         const partes = [];
@@ -474,7 +532,7 @@
             }
         });
         if(partes.length === 0){ alert('Nada para copiar ainda. Gere um prontuário primeiro.'); return; }
-        const texto = partes.join('\n------------------------------\n');
+        const texto = partes.join('\n\n');
         if(navigator.clipboard && window.isSecureContext){
             navigator.clipboard.writeText(texto).then(()=>efeito(btn)).catch(()=>copiarTextoFallback(texto,btn));
         } else { copiarTextoFallback(texto,btn); }
