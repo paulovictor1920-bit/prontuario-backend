@@ -220,6 +220,10 @@
             onclick="copiarProntuarioInteiro(this)">📋 Copiar prontuário inteiro</button>
     </div>
 
+    <div id="avisoHistorico" style="display:none; background:#7a1f1f; color:#fff; border-radius:6px; padding:10px 12px; margin-bottom:12px; font-size:13px;">
+        ⚠️ <strong>Atenção:</strong> o documento foi gerado, mas NÃO foi possível salvar no histórico agora (banco de histórico indisponível). Reabrir este BE pelo número ou pelos recentes pode não funcionar. O documento atual está normal — copie o que precisar antes de sair.
+    </div>
+
     <div class="doc" id="docDiscussao" style="display:block;">
         <div class="doc-head"><h3>💡 Discussão de Retaguarda</h3></div>
         <div id="resDiscussao" class="box box-discussao">Aguardando entrada de dados...</div>
@@ -479,6 +483,7 @@
         document.getElementById('grupoProntuario').innerHTML='';
         document.getElementById('btnCopiarTudo').style.display='none';
         document.getElementById('timelineWrap').style.display='none';
+        document.getElementById('avisoHistorico').style.display='none';
 
         try{
             const resp = await fetch(API_URL,{
@@ -488,7 +493,16 @@
             });
             const data = await resp.json();
             if(data.erro){ alert('Erro: '+data.erro); }
-            else{ exibirResposta(data); carregarRecentes(); }
+            else{
+                exibirResposta(data);
+                carregarRecentes();
+                // Feedback do histórico: avisa só quando NÃO salvou (caso contrário
+                // não polui a tela). Se não salvou, reabrir este BE pode não funcionar.
+                if(data._historicoSalvo === false){
+                    const aviso = document.getElementById('avisoHistorico');
+                    if(aviso){ aviso.style.display = 'block'; }
+                }
+            }
         }catch(e){
             alert('Erro de conexão com o servidor.');
         }finally{
