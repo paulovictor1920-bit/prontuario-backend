@@ -35,11 +35,6 @@
     textarea{min-height:90px; resize:vertical;}
     .grid-3{display:grid; grid-template-columns:1.4fr 1fr 1fr; gap:10px; margin-bottom:12px;}
     .grid-2{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:12px;}
-    .options-grid{display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:12px 0;
-        background:var(--box); padding:12px; border-radius:8px; border:1px solid var(--line);}
-    .options-grid label{font-weight:normal; margin:0; display:flex; align-items:center; gap:8px; cursor:pointer;}
-    .options-grid input{transform:scale(1.2); accent-color:var(--azul);}
-    .correcao-label{color:var(--amarelo); font-weight:bold!important; grid-column:span 2;}
     .btn-main{background:var(--azul); color:#fff; border:none; padding:14px; border-radius:5px;
         cursor:pointer; font-weight:bold; font-size:16px; flex:1; transition:.2s;}
     .btn-main:hover{background:var(--azulf);}
@@ -67,6 +62,18 @@
         background:#fff; border-radius:50%; transition:.2s;}
     .switch input:checked + .slider{background:var(--verde);}
     .switch input:checked + .slider:before{transform:translateX(24px);}
+    /* Lista de toggles compactos (substitui as antigas checkboxes) */
+    .toggles-lista{display:flex; flex-direction:column; gap:10px; margin:12px 0;
+        background:var(--box); padding:14px; border-radius:8px; border:1px solid var(--line);}
+    .toggle-item{display:flex; align-items:center; justify-content:space-between; gap:10px;}
+    .toggle-item .lbl{font-size:14px; color:var(--texto); font-weight:bold;}
+    .toggle-item.especial .lbl{color:var(--amarelo);}
+    .toggle-item .switch{width:46px; height:25px;}
+    .toggle-item .slider:before{height:19px; width:19px;}
+    .toggle-item .switch input:checked + .slider:before{transform:translateX(21px);}
+    .btn-copiar-tudo{background:var(--azul); color:#fff; border:none; padding:7px 13px;
+        border-radius:4px; cursor:pointer; font-size:12px; font-weight:bold; transition:.2s;}
+    .btn-copiar-tudo:hover{background:var(--azulf);}
     .recentes{display:flex; flex-wrap:wrap; gap:8px; margin-top:6px;}
     .chip-be{background:var(--box); border:1px solid var(--azul); color:var(--azul); padding:6px 12px;
         border-radius:20px; cursor:pointer; font-size:13px; font-weight:bold; transition:.15s;}
@@ -163,11 +170,31 @@
         </label>
     </div>
 
-    <div class="options-grid">
-        <label><input type="checkbox" id="chkAlta"> 🏠 Receita Domiciliar</label>
-        <label><input type="checkbox" id="chkRelatorio"> 📋 Relatório APS</label>
-        <label><input type="checkbox" id="chkBuscar"> 🔎 Buscar em fontes (+ lento)</label>
-        <label class="correcao-label"><input type="checkbox" id="chkCorrecao"> ⚠️ Apenas Corrigir</label>
+    <div class="toggles-lista">
+        <div class="toggle-item">
+            <span class="lbl">🏠 Receita Domiciliar</span>
+            <label class="switch"><input type="checkbox" id="chkAlta"><span class="slider"></span></label>
+        </div>
+        <div class="toggle-item">
+            <span class="lbl">📋 Relatório APS</span>
+            <label class="switch"><input type="checkbox" id="chkRelatorio"><span class="slider"></span></label>
+        </div>
+        <div class="toggle-item">
+            <span class="lbl">🔬 Pedir exame (na unidade)</span>
+            <label class="switch"><input type="checkbox" id="chkExameUnidade"><span class="slider"></span></label>
+        </div>
+        <div class="toggle-item">
+            <span class="lbl">🏥 Pedir exame (externo)</span>
+            <label class="switch"><input type="checkbox" id="chkExameExterno"><span class="slider"></span></label>
+        </div>
+        <div class="toggle-item">
+            <span class="lbl">🔎 Buscar em fontes (+ lento)</span>
+            <label class="switch"><input type="checkbox" id="chkBuscar"><span class="slider"></span></label>
+        </div>
+        <div class="toggle-item especial">
+            <span class="lbl">⚠️ Apenas Corrigir</span>
+            <label class="switch"><input type="checkbox" id="chkCorrecao"><span class="slider"></span></label>
+        </div>
     </div>
 
     <div class="loading" id="loading">🧠 Processando raciocínio e documentos...</div>
@@ -178,7 +205,11 @@
 </div>
 
 <div class="panel">
-    <h2 style="border:none; margin-bottom:14px;">💡 Discussão e Documentos</h2>
+    <div class="topbar" style="margin-bottom:14px;">
+        <h2 style="border:none;">💡 Discussão e Documentos</h2>
+        <button class="btn-copiar-tudo" id="btnCopiarTudo" style="display:none;"
+            onclick="copiarProntuarioInteiro(this)">📋 Copiar prontuário inteiro</button>
+    </div>
 
     <div class="doc" id="docDiscussao" style="display:block;">
         <div class="doc-head"><h3>💡 Discussão de Retaguarda</h3></div>
@@ -225,6 +256,18 @@
             <button class="btn-copiar" onclick="copiar('resRelatorio',this)">Copiar</button></div>
         <div id="resRelatorio" class="box"></div>
     </div>
+
+    <div class="doc" id="docExameUnidade">
+        <div class="doc-head"><h3>🔬 Pedido de Exame (na unidade)</h3>
+            <button class="btn-copiar" onclick="copiar('resExameUnidade',this)">Copiar</button></div>
+        <div id="resExameUnidade" class="box"></div>
+    </div>
+
+    <div class="doc" id="docExameExterno">
+        <div class="doc-head"><h3>🏥 Pedido de Exame (externo)</h3>
+            <button class="btn-copiar" onclick="copiar('resExameExterno',this)">Copiar</button></div>
+        <div id="resExameExterno" class="box"></div>
+    </div>
 </div>
 
 <script>
@@ -235,12 +278,12 @@
 
     // Campos do prontuário, na ordem do SIGRAH. "vital" = quadro separado (sem copiar).
     const CAMPOS_PRONT = [
-        {key:'historia_clinica',   titulo:'01 – História Clínica'},
-        {key:'historia_pregressa', titulo:'02 – História Pregressa'},
-        {key:'sinais_vitais',      titulo:'03 – Sinais Vitais (campos próprios no SIGRAH)', vital:true},
-        {key:'exame_fisico_texto', titulo:'03 – Exame Físico (texto)'},
-        {key:'hipotese_diagnostica',titulo:'04 – Hipótese Diagnóstica'},
-        {key:'conduta',            titulo:'06 – Conduta'}
+        {key:'historia_clinica',   titulo:'01 – História Clínica',                          tituloCopia:'HISTÓRIA CLÍNICA'},
+        {key:'historia_pregressa', titulo:'02 – História Pregressa',                        tituloCopia:'HISTÓRIA PREGRESSA'},
+        {key:'sinais_vitais',      titulo:'03 – Sinais Vitais (campos próprios no SIGRAH)', vital:true, tituloCopia:'SINAIS VITAIS'},
+        {key:'exame_fisico_texto', titulo:'03 – Exame Físico (texto)',                      tituloCopia:'EXAME FÍSICO'},
+        {key:'hipotese_diagnostica',titulo:'04 – Hipótese Diagnóstica',                     tituloCopia:'HIPÓTESE DIAGNÓSTICA'},
+        {key:'conduta',            titulo:'06 – Conduta',                                   tituloCopia:'CONDUTA'}
     ];
 
     // ---- Tema claro/escuro ----
@@ -303,6 +346,9 @@
         setBox('docDiluicao','resDiluicao', data.diluicoes);
         setBox('docReceita','resReceita', data.receita);
         setBox('docRelatorio','resRelatorio', data.relatorio);
+        setBox('docExameUnidade','resExameUnidade', data.exame_unidade);
+        setBox('docExameExterno','resExameExterno', data.exame_externo);
+        atualizarBotaoCopiarTudo();
     }
 
     // ---- Lista de recentes (vinda do servidor: só BE + sexo + idade) ----
@@ -358,7 +404,9 @@
             relatorio: document.getElementById('chkRelatorio').checked,
             correcao: document.getElementById('chkCorrecao').checked,
             buscarFontes: document.getElementById('chkBuscar').checked,
-            medicarUpa: document.getElementById('chkMedicarUpa').checked
+            medicarUpa: document.getElementById('chkMedicarUpa').checked,
+            exameUnidade: document.getElementById('chkExameUnidade').checked,
+            exameExterno: document.getElementById('chkExameExterno').checked
         };
         if(!beId || !mensagem){ alert('Preencha o Número do BE e o Relato.'); return; }
 
@@ -368,10 +416,11 @@
             : '🧠 Processando raciocínio e documentos...';
         document.getElementById('loading').style.display = 'block';
         document.getElementById('resDiscussao').innerText = 'Analisando caso...';
-        ['docPresc','docDiluicao','docReceita','docRelatorio','cidWrap','docEvolucao'].forEach(id=>{
+        ['docPresc','docDiluicao','docReceita','docRelatorio','docExameUnidade','docExameExterno','cidWrap','docEvolucao'].forEach(id=>{
             document.getElementById(id).style.display='none';
         });
         document.getElementById('grupoProntuario').innerHTML='';
+        document.getElementById('btnCopiarTudo').style.display='none';
 
         try{
             const resp = await fetch(API_URL,{
@@ -412,8 +461,42 @@
         setTimeout(()=>{btn.innerText=orig; btn.style.background='transparent'; btn.style.color='var(--verde)';},1500);
     }
 
-    // Carrega os recentes ao abrir.
-    carregarRecentes();
+    // ---- Copiar prontuário inteiro (SÓ Acrízio: junta os 6 campos numa tacada) ----
+    // Junta História Clínica, História Pregressa, Sinais Vitais, Exame Físico,
+    // Hipótese e Conduta — na ordem do SIGRAH — separados por uma linha.
+    // NÃO inclui prescrição, diluição, receita, relatório nem exames.
+    function copiarProntuarioInteiro(btn){
+        const partes = [];
+        CAMPOS_PRONT.forEach((c,i)=>{
+            const el = document.getElementById('pront_'+i);
+            if(el && el.innerText.trim()){
+                partes.push(c.tituloCopia + '\n' + el.innerText.trim());
+            }
+        });
+        if(partes.length === 0){ alert('Nada para copiar ainda. Gere um prontuário primeiro.'); return; }
+        const texto = partes.join('\n------------------------------\n');
+        if(navigator.clipboard && window.isSecureContext){
+            navigator.clipboard.writeText(texto).then(()=>efeito(btn)).catch(()=>copiarTextoFallback(texto,btn));
+        } else { copiarTextoFallback(texto,btn); }
+    }
+    // Fallback de cópia a partir de um texto puro (PCs antigos / sem clipboard API).
+    function copiarTextoFallback(texto,btn){
+        const ta=document.createElement('textarea');
+        ta.value=texto; ta.style.position='fixed'; ta.style.left='-9999px';
+        document.body.appendChild(ta); ta.select();
+        try{ document.execCommand('copy'); efeito(btn); }
+        catch(e){ alert('Cópia automática bloqueada. Selecione o texto e use Ctrl+C.'); }
+        document.body.removeChild(ta);
+    }
+
+    // Mostra o botão "Copiar prontuário inteiro" só na UPA Acrízio.
+    function atualizarBotaoCopiarTudo(){
+        const unidade = document.getElementById('unidade').value;
+        const btn = document.getElementById('btnCopiarTudo');
+        const temConteudo = document.getElementById('grupoProntuario').children.length > 0;
+        btn.style.display = (unidade === 'ACRIZIO' && temConteudo) ? 'inline-block' : 'none';
+    }
+    document.getElementById('unidade').addEventListener('change', atualizarBotaoCopiarTudo);
 </script>
 </body>
 </html>
