@@ -204,6 +204,12 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
         // Ponto 2: o médico pode ligar a "busca em fontes confiáveis" caso a caso.
         const usarBusca = op.buscarFontes === true;
 
+        // NOVO: pedidos de exame. Só gera o texto se o respectivo toggle estiver
+        //   ligado. "na unidade" = exames feitos aqui na UPA; "externo" = exames
+        //   para o paciente fazer por conta (clínica/laboratório particular).
+        const exameUnidade = op.exameUnidade === true;
+        const exameExterno = op.exameExterno === true;
+
         const modelToUse = modeloId === 'flash' ? MODELO_RAPIDO : MODELO_PROFUNDO;
 
         // Quando a busca está ligada, ativamos a ferramenta de busca do Gemini.
@@ -248,7 +254,21 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
             instrucoesAcao += '- NÃO gere prescrição interna: deixe "prescricao_interna" VAZIA. Não houve medicação na unidade, a menos que o próprio relato do médico já descreva uma medicação como JÁ administrada.\n';
         }
         if (op.alta) instrucoesAcao += '- RECEITA DOMICILIAR.\n';
-        if (op.relatorio) instrucoesAcao += '- RELATÓRIO APS.\n';
+        if (op.relatorio) {
+            instrucoesAcao += '- RELATÓRIO APS.\n';
+        } else {
+            instrucoesAcao += '- NÃO gere relatório: deixe "relatorio" SEMPRE VAZIO (""). O médico NÃO marcou relatório. NÃO escreva relatório por iniciativa própria, mesmo que pareça útil.\n';
+        }
+        if (exameUnidade) {
+            instrucoesAcao += '- PEDIDO DE EXAME (NA UNIDADE): redija no campo "exame_unidade" o texto do(s) exame(s) a serem realizados AQUI na UPA, conforme o comando do médico. Se ele indicou quais exames, formate-os; se ele perguntou quais você pediria, escolha os pertinentes ao caso e liste-os de forma assertiva.\n';
+        } else {
+            instrucoesAcao += '- NÃO gere pedido de exame na unidade: deixe "exame_unidade" VAZIO ("").\n';
+        }
+        if (exameExterno) {
+            instrucoesAcao += '- PEDIDO DE EXAME (EXTERNO): redija no campo "exame_externo" o texto de solicitação de exame(s) para o paciente realizar em serviço externo (clínica/laboratório particular ou referência), no formato que um médico usaria num pedido. Se o médico indicou o exame, formate-o; se ele perguntou quais pediria, escolha os pertinentes.\n';
+        } else {
+            instrucoesAcao += '- NÃO gere pedido de exame externo: deixe "exame_externo" VAZIO ("").\n';
+        }
 
         // Ponto 2: bloco de fontes confiáveis (só entra no prompt se busca ligada).
         // A IA usa a busca do Gemini priorizando estas fontes e cita o link na
@@ -283,10 +303,21 @@ SEXO: ${sexoTxt} | IDADE: ${idadeTxt}
 
 REGRA ABSOLUTA DE FIDELIDADE AO RELATO:
 - NUNCA invente sinais vitais. Se o médico não informou um valor (SpO2, FC, FR,
-  PA, temperatura, peso), DEIXE-O EM BRANCO. É proibido preencher com valores
-  "normais" presumidos.
+  PA, temperatura, peso), NÃO ESCREVA esse item — simplesmente OMITA-O. NÃO
+  escreva o rótulo seguido de branco (ex: NÃO escreva "FR: |" nem "Tax: °C").
+  Liste APENAS os itens que o médico informou. Se ele não informou NENHUM sinal
+  vital, deixe o campo "sinais_vitais" totalmente VAZIO (""). É proibido
+  preencher com valores "normais" presumidos e proibido listar rótulos vazios.
 - NUNCA invente medicação na UPA. Só descreva administração na unidade se o
   médico solicitou OU se o relato diz que já foi feita.
+- MEDICAÇÃO FORA DA PADRONIZAÇÃO (SUS): se o médico prescreveu um remédio que
+  NÃO consta na lista desta unidade, VOCÊ DEVE OBEDECER e incluí-lo normalmente
+  na prescrição/receita. NÃO se recuse e NÃO substitua o medicamento só porque
+  ele não está padronizado. Apenas SINALIZE na "discussao", EM CAIXA ALTA, que o
+  item está fora da padronização (ex: "ATENÇÃO: AMOXICILINA + CLAVULANATO NÃO
+  CONSTA NA PADRONIZAÇÃO DESTA UNIDADE"). Você SÓ pode contrariar/substituir uma
+  prescrição do médico por motivo de SEGURANÇA (interação medicamentosa, alergia
+  relatada, dose perigosa, contraindicação) — NUNCA pela simples ausência no SUS.
 - Respeite literalmente o que o médico pediu, trocou ou proibiu na receita
   domiciliar. Se ele disse "não trocar" ou "manter", mantenha exatamente.
 - Não invente comorbidades, alergias ou achados de exame não relatados. Quando
@@ -310,6 +341,8 @@ REGRAS DE SAÍDA (responda em JSON puro com EXATAMENTE estas chaves):
   "prescricao_interna": "",
   "receita": "",
   "relatorio": "",
+  "exame_unidade": "",
+  "exame_externo": "",
   "fontes": ""
 }
 
@@ -357,11 +390,14 @@ AR: MVF presente bilateralmente, sem RA
 AD: plano, flácido, RHA presentes, indolor à palpação, sem massas ou visceromegalias
 Neurológico: ECG 15, pupilas isocóricas e fotorreagentes, pares cranianos preservados, força e sensibilidade preservadas e simétricas nos 4 membros, sem sinais de irritação meníngea"
      (campo 03 - parte textual)
-   - "sinais_vitais": só os números, no formato "SpO2: __ | FC: __ | FR: __ |
-     PA: __ | Tax: __ °C | Peso: __ kg". REGRA CRÍTICA: preencha APENAS os
-     valores que o médico informou explicitamente no relato. Para todo valor
-     NÃO informado, deixe em BRANCO após os dois-pontos (ex: "PA: |"). É
-     TERMINANTEMENTE PROIBIDO inventar, estimar ou presumir valores "normais".
+   - "sinais_vitais": liste APENAS os sinais que o médico informou, separados por
+     " | ", no formato "RÓTULO: valor". Use os rótulos padrão quando couber:
+     SpO2, FC, FR, PA, Tax (em °C), Peso (em kg). EXEMPLO: se o médico só informou
+     pressão e frequência cardíaca, o campo deve conter EXATAMENTE algo como
+     "PA: 130x80 mmHg | FC: 92 bpm" — e NADA MAIS. REGRA CRÍTICA: NÃO inclua
+     rótulos de itens não informados (nada de "FR:", "SpO2:" ou "Tax: °C" vazios).
+     Se NENHUM sinal vital foi informado, deixe este campo TOTALMENTE VAZIO ("").
+     É TERMINANTEMENTE PROIBIDO inventar, estimar ou presumir valores "normais".
      (vai num quadro separado, NÃO copiado junto)
    - "hipotese_diagnostica": a(s) hipótese(s) em texto. (campo 04)
    - "conduta": condutas e orientações. SEJA CONCISO — nada de "encher
@@ -404,6 +440,16 @@ Neurológico: ECG 15, pupilas isocóricas e fotorreagentes, pares cranianos pres
 
 6. "relatorio": parágrafo único, de médico para médico, começando com
    "Colega, paciente avaliado nesta UPA por...".
+
+7. "exame_unidade": texto do pedido de exame(s) a serem realizados NA PRÓPRIA
+   UPA. Preencha SOMENTE se solicitado na diretriz de ação; caso contrário "".
+   Escreva como um pedido médico real (cabeçalho curto + lista dos exames).
+
+8. "exame_externo": texto de solicitação de exame(s) para o paciente realizar
+   FORA da unidade (clínica/laboratório particular ou serviço de referência).
+   Preencha SOMENTE se solicitado na diretriz de ação; caso contrário "".
+   Redija no formato consagrado de um pedido de exame ("Solicito..."), citando
+   a indicação clínica quando pertinente.
 
 Deixe vazio "" (ou subcampos vazios) o que não foi solicitado.
 
@@ -461,6 +507,15 @@ ${mensagem}`;
         // Garante que a estrutura do prontuário existe (evita quebrar o front).
         if (!dados.prontuario) dados.prontuario = {};
         if (typeof dados.evolucao !== 'string') dados.evolucao = '';
+
+        // --- TRAVAS DE SEGURANÇA (servidor manda, não a IA) ---
+        // Mesmo que a IA preencha algo por conta própria, se o toggle estava
+        // desligado, o campo é ZERADO aqui antes de ir para a tela.
+        if (!op.relatorio) dados.relatorio = '';
+        if (!exameUnidade) dados.exame_unidade = '';
+        if (!exameExterno) dados.exame_externo = '';
+        if (typeof dados.exame_unidade !== 'string') dados.exame_unidade = '';
+        if (typeof dados.exame_externo !== 'string') dados.exame_externo = '';
 
         // --- Rede de segurança farmacológica ---
         const textoConferir = [dados.prescricao_interna, dados.receita].filter(Boolean).join('\n');
