@@ -357,6 +357,14 @@ INSTRUÇÕES DE CADA CAMPO:
    certeza. No FINAL, escreva em destaque: "CID: <código e descrição>".
    REGRA ABSOLUTA: NENHUMA incerteza, dúvida ou linguagem reflexiva pode
    aparecer nos campos do "prontuario". Toda hesitação fica AQUI, na discussão.
+   PISTA DIAGNÓSTICA PELA MEDICAÇÃO CONTÍNUA: se o relato citar um medicamento de
+   uso contínuo que seja marcador típico de uma doença (ex.: ácido valproico →
+   epilepsia/transtorno do humor; levotiroxina → hipotireoidismo; insulina/
+   metformina → diabetes; enalapril/losartana → hipertensão), e essa doença NÃO
+   estiver na "historia_pregressa", acrescente UMA linha curta sinalizando a
+   possibilidade para confirmar. Ex.: "⚕️ Uso contínuo de ácido valproico sugere
+   epilepsia/transtorno do humor não citado na pregressa — confirmar." NÃO faça
+   isso se a doença já constar na pregressa (não repita o óbvio nem gaste espaço).
 
 2. "cid": APENAS o(s) código(s) CID e descrição. Ex: "J00 - Nasofaringite aguda".
    Nada além disso neste campo.
@@ -401,15 +409,15 @@ Neurológico: ECG 15, pupilas isocóricas e fotorreagentes, pares cranianos pres
      (vai num quadro separado, NÃO copiado junto)
    - "hipotese_diagnostica": a(s) hipótese(s) em texto. (campo 04)
    - "conduta": condutas e orientações. SEJA CONCISO — nada de "encher
-     linguiça". FORMATO OBRIGATÓRIO: comece com "CD:" sozinho na primeira
-     linha, depois ITENS COM HÍFEN, um por linha (quebra real \\n). Mire em
-     3 a 5 itens curtos e objetivos; agrupe ações relacionadas no mesmo item.
+     linguiça". FORMATO OBRIGATÓRIO: NÃO escreva nenhum cabeçalho como "CD:" ou
+     "CONDUTA" — comece DIRETO pelos ITENS COM HÍFEN, um por linha (quebra real
+     \\n). Mire em 3 a 5 itens curtos e objetivos; agrupe ações relacionadas no
+     mesmo item.
      REGRA OBRIGATÓRIA: sempre que houver medicação, CITE-A NOMINALMENTE com
      dose, via e frequência — tanto a feita na UPA quanto a da receita
      domiciliar (não escreva apenas "medicação sintomática" ou "receita
      entregue" sem nomear os fármacos). MODELO:
-     "CD:
-- Sintomático na UPA: Tenoxicam 20 mg IM + Dipirona 1 g (2 mL) EV, agora.
+     "- Sintomático na UPA: Tenoxicam 20 mg IM + Dipirona 1 g (2 mL) EV, agora.
 - Reavaliação após o efeito; se melhora, alta com sinais de alerta (piora súbita, febre, déficit).
 - Receita domiciliar: Naproxeno 500 mg 12/12h por 5 dias e Metoclopramida 10 mg se náusea.
 - Encaminhamento para acompanhamento na APS."
@@ -577,6 +585,32 @@ app.get('/api/historico/:beId', (req, res) => {
         idade: ultimo.idade || '',
         tipo: ultimo.tipo || 'prontuario',
         resposta: ultimo.resposta || {}
+    });
+});
+
+// ----------------------------------------------------------------------------
+//  ROTA: linha do tempo de um BE (todas as etapas das últimas 72h).
+//  Devolve a pilha inteira (prontuário, correções, evoluções) em ordem, para
+//  o médico clicar e ver qualquer etapa. NÃO guarda nome do paciente (LGPD).
+// ----------------------------------------------------------------------------
+app.get('/api/timeline/:beId', (req, res) => {
+    const hist = patientCache.get(req.params.beId);
+    if (!hist || hist.length === 0) {
+        return res.status(404).json({ erro: 'Sem histórico para este BE (pode ter expirado em 72h).' });
+    }
+    const ultimo = hist[hist.length - 1];
+    const etapas = hist.map((h, i) => ({
+        indice: i,
+        tipo: h.tipo || 'prontuario',
+        quando: h.quando || 0,
+        correcao: !!(h.comandos && h.comandos.correcao),
+        resposta: h.resposta || {}
+    }));
+    res.json({
+        beId: req.params.beId,
+        sexo: ultimo.sexo || '',
+        idade: ultimo.idade || '',
+        etapas
     });
 });
 
