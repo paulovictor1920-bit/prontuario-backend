@@ -334,7 +334,6 @@ async function chamarClaude(promptFinal) {
         body: JSON.stringify({
             model: MODELO_CLAUDE,
             max_tokens: 8192,
-            temperature: 0.4,
             // Reforço para o Claude devolver SÓ o JSON (sem texto em volta).
             system: 'Você responde EXCLUSIVAMENTE com um objeto JSON válido, '
                 + 'sem nenhum texto antes ou depois, sem cercas de código (```), '
@@ -761,7 +760,6 @@ ${JSON.stringify(dadosClaude)}`;
                     body: JSON.stringify({
                         model: MODELO_CLAUDE,
                         max_tokens: 2048,
-                        temperature: 0.3,
                         messages: [{ role: 'user', content: promptComparar }]
                     })
                 });
