@@ -1,10 +1,13 @@
 {
   "name": "prontuario-rapido-backend",
-  "version": "1.0.0",
-  "description": "Backend para gerador de prontuário na UPA",
+  "version": "1.1.0",
+  "description": "Backend para gerador de prontuário na UPA (Gemini + Claude com fallback e comparação)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "@google/generative-ai": "latest",
