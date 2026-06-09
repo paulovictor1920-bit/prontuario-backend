@@ -30,6 +30,11 @@ app.use(express.json());
 const MODELO_RAPIDO = 'gemini-3.5-flash';
 const MODELO_PROFUNDO = 'gemini-2.5-pro';
 
+//  Modelo do Claude (Anthropic) — usado como ALTERNATIVA ao Gemini.
+//  Serve para dois fins: (1) você pode escolhê-lo manualmente na tela; (2) se o
+//  Gemini falhar com sobrecarga (erro 503), o servidor cai pro Claude sozinho.
+const MODELO_CLAUDE = 'claude-opus-4-8';
+
 // Sites autorizados a usar a API. Vazio = libera geral (modo teste).
 // Abaixo esta o link do seu site (GitHub Pages), ja configurado.
 const SITES_PERMITIDOS = [
@@ -51,6 +56,14 @@ if (!process.env.GEMINI_API_KEY) {
 }
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
+//  Chave da Anthropic (Claude). Igual à do Gemini, fica no Render como variável
+//  de ambiente ANTHROPIC_API_KEY — NUNCA escrita no código. Sem ela, o Claude
+//  (escolha manual, fallback e comparação) não funciona, mas o Gemini continua
+//  normal.
+if (!process.env.ANTHROPIC_API_KEY) {
+    console.error('ATENÇÃO: ANTHROPIC_API_KEY não configurada no Render. O Claude (alternativa/fallback/comparação) não vai funcionar; o Gemini segue normal.');
+}
 
 // ----------------------------------------------------------------------------
 //  HISTÓRICO PERSISTENTE (Redis / Upstash)
@@ -254,6 +267,120 @@ function montarDiluicoes(textoPrescricao) {
 }
 
 // ----------------------------------------------------------------------------
+//  EXTRATOR DE JSON ROBUSTO (reutilizável)
+// ----------------------------------------------------------------------------
+//  A IA às vezes devolve o JSON dentro de cercas ```json ... ``` ou com texto em
+//  volta (sobretudo com a busca ligada). Esta função tenta várias formas de ler.
+function extrairJson(txt) {
+    if (!txt) return null;
+    try { return JSON.parse(txt); } catch (e) {}
+    let limpo = txt.replace(/```json/gi, '').replace(/```/g, '').trim();
+    try { return JSON.parse(limpo); } catch (e) {}
+    const ini = limpo.indexOf('{');
+    const fim = limpo.lastIndexOf('}');
+    if (ini !== -1 && fim !== -1 && fim > ini) {
+        try { return JSON.parse(limpo.slice(ini, fim + 1)); } catch (e) {}
+    }
+    return null;
+}
+
+// ----------------------------------------------------------------------------
+//  CHAMADA ÀS IAs — cada função recebe o prompt pronto e devolve texto bruto.
+//  Lançam erro se falharem (quem chamou decide o que fazer: fallback, avisar...).
+// ----------------------------------------------------------------------------
+
+//  Chama o Gemini. 'modeloId' = 'flash' ou 'pro'. 'usarBusca' liga a busca web.
+async function chamarGemini(promptFinal, modeloId, usarBusca) {
+    const modelToUse = modeloId === 'flash' ? MODELO_RAPIDO : MODELO_PROFUNDO;
+    const configModelo = { model: modelToUse };
+    if (usarBusca) {
+        configModelo.tools = [{ googleSearch: {} }];
+    }
+    const model = genAI.getGenerativeModel(configModelo);
+    const generationConfig = { maxOutputTokens: 8192, temperature: 0.4 };
+    if (!usarBusca) {
+        generationConfig.responseMimeType = 'application/json';
+    }
+    const result = await model.generateContent({
+        contents: [{ role: 'user', parts: [{ text: promptFinal }] }],
+        generationConfig
+    });
+    return result.response.text();
+}
+
+//  Detecta se um erro do Gemini é "sobrecarga / indisponível" (vale tentar o
+//  Claude). Cobre 503 (Service Unavailable), 429 (limite) e 500 (erro interno).
+function ehFalhaTemporariaGemini(error) {
+    const msg = (error && error.message) ? error.message : String(error || '');
+    return /\b(503|429|500)\b/.test(msg)
+        || /unavailable|overloaded|high demand|try again|internal/i.test(msg);
+}
+
+//  Chama o Claude (Anthropic) via API HTTP. Não precisa de biblioteca: usamos o
+//  fetch que o Node moderno já tem. Devolve o texto da resposta.
+//  OBS: a busca em fontes (googleSearch) é específica do Gemini; quando o Claude
+//  é usado, ela não se aplica — pedimos só o JSON com o conhecimento do modelo.
+async function chamarClaude(promptFinal) {
+    if (!process.env.ANTHROPIC_API_KEY) {
+        throw new Error('ANTHROPIC_API_KEY não configurada no Render.');
+    }
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': process.env.ANTHROPIC_API_KEY,
+            'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+            model: MODELO_CLAUDE,
+            max_tokens: 8192,
+            temperature: 0.4,
+            // Reforço para o Claude devolver SÓ o JSON (sem texto em volta).
+            system: 'Você responde EXCLUSIVAMENTE com um objeto JSON válido, '
+                + 'sem nenhum texto antes ou depois, sem cercas de código (```), '
+                + 'seguindo exatamente o formato e as chaves pedidos no prompt.',
+            messages: [{ role: 'user', content: promptFinal }]
+        })
+    });
+    if (!resp.ok) {
+        let detalhe = '';
+        try { detalhe = JSON.stringify(await resp.json()); } catch (e) {}
+        throw new Error('Claude HTTP ' + resp.status + ' ' + resp.statusText + ' ' + detalhe);
+    }
+    const data = await resp.json();
+    // A resposta vem em data.content (array de blocos); juntamos os de texto.
+    return (data.content || [])
+        .map(b => (b && b.type === 'text') ? b.text : '')
+        .filter(Boolean)
+        .join('\n');
+}
+
+//  ORQUESTRADOR: recebe o prompt e o modelo escolhido na tela. Decide quem chama
+//  e aplica o FALLBACK AUTOMÁTICO. Devolve { dados, motorUsado, caiuParaClaude }.
+//   - modeloId 'claude'        -> chama o Claude direto.
+//   - modeloId 'flash' / 'pro' -> chama o Gemini; se ele cair por sobrecarga,
+//                                 tenta o Claude automaticamente.
+async function gerarComFallback(promptFinal, modeloId, usarBusca) {
+    if (modeloId === 'claude') {
+        const txt = await chamarClaude(promptFinal);
+        return { dados: extrairJson(txt), motorUsado: 'claude', caiuParaClaude: false };
+    }
+    try {
+        const txt = await chamarGemini(promptFinal, modeloId, usarBusca);
+        return { dados: extrairJson(txt), motorUsado: 'gemini', caiuParaClaude: false };
+    } catch (error) {
+        // Só cai pro Claude se: (a) for falha temporária do Gemini E (b) houver
+        // chave da Anthropic configurada. Senão, repassa o erro original.
+        if (ehFalhaTemporariaGemini(error) && process.env.ANTHROPIC_API_KEY) {
+            console.error('Gemini falhou (sobrecarga); tentando Claude. Detalhe:', error.message);
+            const txt = await chamarClaude(promptFinal);
+            return { dados: extrairJson(txt), motorUsado: 'claude', caiuParaClaude: true };
+        }
+        throw error;
+    }
+}
+
+// ----------------------------------------------------------------------------
 //  ROTA PRINCIPAL
 // ----------------------------------------------------------------------------
 app.post('/api/atendimento', limitarAbuso, async (req, res) => {
@@ -285,16 +412,11 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
         const exameUnidade = op.exameUnidade === true;
         const exameExterno = op.exameExterno === true;
 
-        const modelToUse = modeloId === 'flash' ? MODELO_RAPIDO : MODELO_PROFUNDO;
+        // NOVO: comparação entre IAs (gera nas duas e resume as diferenças).
+        const compararIAs = op.compararIAs === true;
 
-        // Quando a busca está ligada, ativamos a ferramenta de busca do Gemini.
-        // OBS técnica: busca + JSON forçado não convivem na mesma chamada, então
-        // com busca ligada pedimos texto e extraímos o JSON de dentro depois.
-        const configModelo = { model: modelToUse };
-        if (usarBusca) {
-            configModelo.tools = [{ googleSearch: {} }];
-        }
-        const model = genAI.getGenerativeModel(configModelo);
+        // O modelo escolhido na tela: 'flash', 'pro' ou 'claude'.
+        // A instanciação/chamada agora é feita pelo orquestrador gerarComFallback.
 
         let historicoPaciente = await lerHistorico(beId);
         // O tipo agora é decidido pelo médico (botão), não mais adivinhado pelo histórico.
@@ -544,87 +666,146 @@ ${JSON.stringify(historicoPaciente)}
 MENSAGEM DO MÉDICO:
 ${mensagem}`;
 
-        // Configuração de geração. Com busca ligada NÃO usamos JSON forçado
-        // (são incompatíveis no Gemini); pedimos para a IA devolver o JSON
-        // dentro do texto e extraímos depois.
-        const generationConfig = { maxOutputTokens: 8192, temperature: 0.4 };
-        if (!usarBusca) {
-            generationConfig.responseMimeType = 'application/json';
+        // --------------------------------------------------------------
+        //  PÓS-PROCESSAMENTO de uma resposta da IA (travas + segurança +
+        //  diluições + fontes). Aplicado a CADA versão gerada (inclusive na
+        //  comparação). Recebe e devolve o objeto 'dados' já tratado.
+        // --------------------------------------------------------------
+        function posProcessar(dados) {
+            if (!dados) return null;
+            if (!dados.prontuario) dados.prontuario = {};
+            if (typeof dados.evolucao !== 'string') dados.evolucao = '';
+
+            // --- TRAVAS DE SEGURANÇA (servidor manda, não a IA) ---
+            if (!op.relatorio) dados.relatorio = '';
+            if (!exameUnidade) dados.exame_unidade = '';
+            if (!exameExterno) dados.exame_externo = '';
+            if (typeof dados.exame_unidade !== 'string') dados.exame_unidade = '';
+            if (typeof dados.exame_externo !== 'string') dados.exame_externo = '';
+
+            // --- Rede de segurança farmacológica ---
+            const textoConferir = [dados.prescricao_interna, dados.receita].filter(Boolean).join('\n');
+            const alertas = conferirMedicamentos(textoConferir, listaUnidade);
+            if (alertas.length > 0) {
+                const aviso = '\n\n⚠️ CONFERÊNCIA AUTOMÁTICA (confira pessoalmente): possivelmente fora da padronização desta unidade:\n- '
+                    + alertas.join('\n- ');
+                dados.discussao = (dados.discussao || '') + aviso;
+            }
+
+            // --- Diluições (SÓ Barreiro) ---
+            dados.diluicoes = '';
+            if (unidade === 'BARREIRO') {
+                const dil = montarDiluicoes(dados.prescricao_interna);
+                dados.diluicoes = dil.blocoSeparado;
+                if (dil.naoEncontrados.length > 0) {
+                    const aviso = '\n\n💧 DILUIÇÃO NÃO ENCONTRADA na tabela de referência (consultar manualmente):\n- '
+                        + dil.naoEncontrados.join('\n- ');
+                    dados.discussao = (dados.discussao || '') + aviso;
+                }
+            }
+
+            // --- Fontes citadas: anexa o link ao fim da discussão ---
+            if (dados.fontes && dados.fontes.trim()) {
+                dados.discussao = (dados.discussao || '')
+                    + '\n\n📚 FONTES CONSULTADAS:\n' + dados.fontes.trim();
+            }
+            return dados;
         }
 
-        const result = await model.generateContent({
-            contents: [{ role: 'user', parts: [{ text: promptFinal }] }],
-            generationConfig
+        const erroJsonInvalido = () => res.status(502).json({
+            erro: 'A IA devolveu resposta incompleta. Tente enviar de novo' +
+                  (usarBusca ? ' (a busca em fontes às vezes alonga a resposta; tente sem ela se persistir).' : '.')
         });
 
-        let textoBruto = result.response.text();
-
-        // Se a busca estava ligada, o texto pode vir com cercas ```json ... ```
-        // ou texto em volta. Extraímos o objeto JSON de dentro com segurança.
-        function extrairJson(txt) {
-            if (!txt) return null;
-            // tenta direto
-            try { return JSON.parse(txt); } catch (e) {}
-            // remove cercas de código
-            let limpo = txt.replace(/```json/gi, '').replace(/```/g, '').trim();
-            try { return JSON.parse(limpo); } catch (e) {}
-            // pega do primeiro { até o último }
-            const ini = limpo.indexOf('{');
-            const fim = limpo.lastIndexOf('}');
-            if (ini !== -1 && fim !== -1 && fim > ini) {
-                try { return JSON.parse(limpo.slice(ini, fim + 1)); } catch (e) {}
+        // ==============================================================
+        //  MODO COMPARAÇÃO: gera nas DUAS IAs (Gemini Pro + Claude) e pede
+        //  ao Claude um resumo clínico das diferenças. NÃO salva no
+        //  histórico (você ainda vai escolher qual versão fica).
+        // ==============================================================
+        if (compararIAs) {
+            if (!process.env.ANTHROPIC_API_KEY) {
+                return res.status(400).json({ erro: 'A comparação precisa da chave do Claude (ANTHROPIC_API_KEY) configurada no Render.' });
             }
-            return null;
-        }
+            let textoGemini, textoClaude;
+            try {
+                // Gera as duas em paralelo para não somar os tempos de espera.
+                [textoGemini, textoClaude] = await Promise.all([
+                    chamarGemini(promptFinal, 'pro', usarBusca),
+                    chamarClaude(promptFinal)
+                ]);
+            } catch (e) {
+                console.error('Erro na geração comparativa:', e.message);
+                return res.status(502).json({ erro: 'Não foi possível gerar as duas versões para comparar. Tente novamente.' });
+            }
+            const dadosGemini = posProcessar(extrairJson(textoGemini));
+            const dadosClaude = posProcessar(extrairJson(textoClaude));
+            if (!dadosGemini || !dadosClaude) return erroJsonInvalido();
 
-        let dados = extrairJson(textoBruto);
-        if (!dados) {
-            console.error('IA devolveu JSON inválido:\n', textoBruto);
-            return res.status(502).json({
-                erro: 'A IA devolveu resposta incompleta. Tente enviar de novo' +
-                      (usarBusca ? ' (a busca em fontes às vezes alonga a resposta; tente sem ela se persistir).' : '.')
+            // Pede ao Claude (leitura neutra) um resumo das diferenças clínicas.
+            let resumoDiferencas = '';
+            try {
+                const promptComparar = `Você é um médico revisor. Abaixo estão DUAS versões de documentação clínica geradas por IAs diferentes (A e B) para o MESMO caso. Compare-as e escreva um resumo OBJETIVO em português das DIFERENÇAS CLINICAMENTE RELEVANTES, cobrindo: hipótese diagnóstica, conduta, medicação/prescrição, CID e quaisquer red flags que uma citou e a outra não. Seja conciso (tópicos curtos com hífen). Se forem praticamente equivalentes, diga isso. Onde houver divergência de conduta ou medicação, destaque, pois é onde mora o risco. NÃO reescreva os documentos; só aponte as diferenças. Responda em TEXTO simples (não JSON).
+
+VERSÃO A (Gemini):
+${JSON.stringify(dadosGemini)}
+
+VERSÃO B (Claude):
+${JSON.stringify(dadosClaude)}`;
+                const respCmp = await fetch('https://api.anthropic.com/v1/messages', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'x-api-key': process.env.ANTHROPIC_API_KEY,
+                        'anthropic-version': '2023-06-01'
+                    },
+                    body: JSON.stringify({
+                        model: MODELO_CLAUDE,
+                        max_tokens: 2048,
+                        temperature: 0.3,
+                        messages: [{ role: 'user', content: promptComparar }]
+                    })
+                });
+                if (respCmp.ok) {
+                    const d = await respCmp.json();
+                    resumoDiferencas = (d.content || []).map(b => b.type === 'text' ? b.text : '').filter(Boolean).join('\n');
+                }
+            } catch (e) {
+                console.error('Erro ao resumir diferenças:', e.message);
+            }
+            if (!resumoDiferencas) {
+                resumoDiferencas = 'Não foi possível gerar o resumo automático das diferenças. Compare as duas versões manualmente antes de escolher.';
+            }
+
+            // Devolve as DUAS versões + o resumo. A escolha (e o salvamento) é
+            // feita depois, pela tela, na rota /api/escolher.
+            return res.json({
+                _comparacao: true,
+                resumoDiferencas,
+                versaoGemini: dadosGemini,
+                versaoClaude: dadosClaude
             });
         }
 
-        // Garante que a estrutura do prontuário existe (evita quebrar o front).
-        if (!dados.prontuario) dados.prontuario = {};
-        if (typeof dados.evolucao !== 'string') dados.evolucao = '';
-
-        // --- TRAVAS DE SEGURANÇA (servidor manda, não a IA) ---
-        // Mesmo que a IA preencha algo por conta própria, se o toggle estava
-        // desligado, o campo é ZERADO aqui antes de ir para a tela.
-        if (!op.relatorio) dados.relatorio = '';
-        if (!exameUnidade) dados.exame_unidade = '';
-        if (!exameExterno) dados.exame_externo = '';
-        if (typeof dados.exame_unidade !== 'string') dados.exame_unidade = '';
-        if (typeof dados.exame_externo !== 'string') dados.exame_externo = '';
-
-        // --- Rede de segurança farmacológica ---
-        const textoConferir = [dados.prescricao_interna, dados.receita].filter(Boolean).join('\n');
-        const alertas = conferirMedicamentos(textoConferir, listaUnidade);
-        if (alertas.length > 0) {
-            const aviso = '\n\n⚠️ CONFERÊNCIA AUTOMÁTICA (confira pessoalmente): possivelmente fora da padronização desta unidade:\n- '
-                + alertas.join('\n- ');
-            dados.discussao = (dados.discussao || '') + aviso;
+        // ==============================================================
+        //  MODO NORMAL: uma IA só (com fallback automático se for Gemini).
+        // ==============================================================
+        let saida;
+        try {
+            saida = await gerarComFallback(promptFinal, modeloId, usarBusca);
+        } catch (error) {
+            console.error('Erro ao gerar com a IA:', error.message);
+            return res.status(502).json({ erro: 'A IA está indisponível no momento. Tente novamente em instantes ou troque o modelo (Flash / Pro / Claude).' });
         }
 
-        // --- Diluições (SÓ Barreiro) ---
-        dados.diluicoes = '';
-        if (unidade === 'BARREIRO') {
-            const dil = montarDiluicoes(dados.prescricao_interna);
-            dados.diluicoes = dil.blocoSeparado;
-            if (dil.naoEncontrados.length > 0) {
-                const aviso = '\n\n💧 DILUIÇÃO NÃO ENCONTRADA na tabela de referência (consultar manualmente):\n- '
-                    + dil.naoEncontrados.join('\n- ');
-                dados.discussao = (dados.discussao || '') + aviso;
-            }
+        let dados = posProcessar(saida.dados);
+        if (!dados) {
+            console.error('IA devolveu JSON inválido.');
+            return erroJsonInvalido();
         }
 
-        // --- Fontes citadas (ponto 2): anexa o link ao fim da discussão ---
-        if (dados.fontes && dados.fontes.trim()) {
-            dados.discussao = (dados.discussao || '')
-                + '\n\n📚 FONTES CONSULTADAS:\n' + dados.fontes.trim();
-        }
+        // Marca qual motor respondeu (e se foi fallback) para a tela avisar.
+        dados._motorUsado = saida.motorUsado;
+        dados._caiuParaClaude = saida.caiuParaClaude;
 
         // Salva no histórico (guarda também sexo/idade/tipo p/ reabrir o caso).
         const quando = Date.now();
@@ -635,8 +816,6 @@ ${mensagem}`;
             quando: quando
         });
         const salvou = await salvarHistorico(beId, historicoPaciente, sexo, idade, quando);
-        // Avisa a tela se o histórico foi gravado (para mostrar "✓ salvo")
-        // ou não (para o médico saber que reabrir esse BE pode não funcionar).
         dados._historicoSalvo = salvou;
 
         res.json(dados);
@@ -644,6 +823,40 @@ ${mensagem}`;
     } catch (error) {
         console.error('Erro no processamento:', error);
         res.status(500).json({ erro: 'Falha no processamento. Tente novamente.' });
+    }
+});
+
+// ----------------------------------------------------------------------------
+//  ROTA: salvar a versão ESCOLHIDA após uma comparação.
+//  A comparação NÃO salva sozinha; depois que o médico escolhe (Gemini ou
+//  Claude), a tela manda a versão escolhida para cá, que então empilha no
+//  histórico do BE — exatamente como um atendimento normal faria.
+// ----------------------------------------------------------------------------
+app.post('/api/escolher', limitarAbuso, async (req, res) => {
+    try {
+        const { beId, mensagem, opcoes, sexo, idade, tipoDocumento, resposta, motorEscolhido } = req.body;
+        if (!beId || !resposta) {
+            return res.status(400).json({ erro: 'Faltam dados para salvar a versão escolhida.' });
+        }
+        const op = opcoes || {};
+        const ehEvolucao = tipoDocumento === 'evolucao';
+        const dados = resposta;
+        dados._motorUsado = motorEscolhido || 'desconhecido';
+
+        const historicoPaciente = await lerHistorico(beId);
+        const quando = Date.now();
+        historicoPaciente.push({
+            medico: mensagem || '', comandos: op, resposta: dados,
+            sexo: sexo || '', idade: (idade !== undefined ? idade : ''),
+            tipo: ehEvolucao ? 'evolucao' : 'prontuario',
+            quando: quando
+        });
+        const salvou = await salvarHistorico(beId, historicoPaciente, sexo, idade, quando);
+        dados._historicoSalvo = salvou;
+        res.json(dados);
+    } catch (error) {
+        console.error('Erro ao salvar versão escolhida:', error);
+        res.status(500).json({ erro: 'Falha ao salvar a versão escolhida.' });
     }
 });
 
