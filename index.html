@@ -51,6 +51,15 @@
     .segmented button{background:transparent; color:var(--azul); border:none; padding:12px;
         font-size:15px; font-weight:bold; cursor:pointer; transition:.15s;}
     .segmented button.ativo{background:var(--azul); color:#fff;}
+    /* Painel de comparação entre IAs (etapa 1: resumo + escolha) */
+    .cmp-wrap{background:var(--box); border:1px solid var(--azul); border-radius:10px; padding:16px; margin-bottom:14px;}
+    .cmp-wrap h3{color:var(--azul); margin-bottom:8px;}
+    .cmp-resumo{white-space:pre-wrap; font-size:14px; line-height:1.5; color:var(--texto); margin-bottom:14px;}
+    .cmp-botoes{display:grid; grid-template-columns:1fr 1fr; gap:10px;}
+    .cmp-botoes button{padding:14px; border-radius:6px; border:1px solid var(--azul); background:transparent;
+        color:var(--azul); font-weight:bold; font-size:15px; cursor:pointer; transition:.15s;}
+    .cmp-botoes button:hover{background:var(--azul); color:#fff;}
+    .aviso-motor{background:#1f4d2e; color:#fff; border-radius:6px; padding:8px 12px; margin-bottom:12px; font-size:13px;}
     .toggle-upa{display:flex; align-items:center; justify-content:space-between; background:var(--box);
         border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:12px;}
     .toggle-upa .lbl{font-weight:bold; font-size:14px; color:var(--titulo);}
@@ -126,10 +135,11 @@
             </select>
         </div>
         <div>
-            <label for="modeloIA">Velocidade da IA:</label>
+            <label for="modeloIA">Cérebro da IA:</label>
             <select id="modeloIA">
-                <option value="pro">Pro (mais raciocínio, lento)</option>
-                <option value="flash">Flash (mais rápido)</option>
+                <option value="pro">Gemini Pro (raciocínio, lento)</option>
+                <option value="flash">Gemini Flash (rápido)</option>
+                <option value="claude">Claude (alternativa)</option>
             </select>
         </div>
     </div>
@@ -200,6 +210,10 @@
             <span class="lbl">🔎 Buscar em fontes (+ lento)</span>
             <label class="switch"><input type="checkbox" id="chkBuscar"><span class="slider"></span></label>
         </div>
+        <div class="toggle-item">
+            <span class="lbl">⚖️ Comparar Gemini × Claude</span>
+            <label class="switch"><input type="checkbox" id="chkComparar"><span class="slider"></span></label>
+        </div>
         <div class="toggle-item especial">
             <span class="lbl">⚠️ Apenas Corrigir</span>
             <label class="switch"><input type="checkbox" id="chkCorrecao"><span class="slider"></span></label>
@@ -218,6 +232,17 @@
         <h2 style="border:none;">💡 Discussão e Documentos</h2>
         <button class="btn-copiar-tudo" id="btnCopiarTudo" style="display:none;"
             onclick="copiarProntuarioInteiro(this)">📋 Copiar prontuário inteiro</button>
+    </div>
+
+    <div id="avisoMotor" class="aviso-motor" style="display:none;"></div>
+
+    <div id="cmpPainel" class="cmp-wrap" style="display:none;">
+        <h3>⚖️ Comparação Gemini × Claude</h3>
+        <div class="cmp-resumo" id="cmpResumo"></div>
+        <div class="cmp-botoes">
+            <button onclick="escolherVersao('gemini')">Usar versão Gemini</button>
+            <button onclick="escolherVersao('claude')">Usar versão Claude</button>
+        </div>
     </div>
 
     <div id="avisoHistorico" style="display:none; background:#7a1f1f; color:#fff; border-radius:6px; padding:10px 12px; margin-bottom:12px; font-size:13px;">
@@ -288,6 +313,11 @@
     const API_URL = BASE_URL + '/api/atendimento';
 
     let tipoAtual = 'prontuario';
+
+    // Estado da comparação: guarda as duas versões e o contexto do pedido,
+    // para quando o médico escolher uma delas (e aí salvar no histórico).
+    let cmpVersoes = null;      // { gemini:{...}, claude:{...} }
+    let cmpContexto = null;     // { beId, mensagem, opcoes, sexo, idade, tipoDocumento }
 
     // Campos do prontuário, na ordem do SIGRAH. "vital" = quadro separado (sem copiar).
     const CAMPOS_PRONT = [
@@ -362,6 +392,56 @@
         setBox('docExameUnidade','resExameUnidade', data.exame_unidade);
         setBox('docExameExterno','resExameExterno', data.exame_externo);
         atualizarBotaoCopiarTudo();
+    }
+
+    // Mostra um aviso quando a resposta veio pelo Claude — sobretudo quando foi
+    // por FALLBACK (o Gemini falhou e o sistema trocou sozinho), para você saber.
+    function mostrarAvisoMotor(data){
+        const el = document.getElementById('avisoMotor');
+        if(!el) return;
+        if(data._caiuParaClaude){
+            el.innerText = '🔁 O Gemini estava indisponível agora — esta resposta foi gerada automaticamente pelo Claude.';
+            el.style.display = 'block';
+        } else if(data._motorUsado === 'claude'){
+            el.innerText = '🤖 Resposta gerada pelo Claude (escolhido por você).';
+            el.style.display = 'block';
+        } else {
+            el.style.display = 'none';
+        }
+    }
+
+    // ETAPA 2 da comparação: o médico escolheu uma versão. Mostramos ela como
+    // versão única (tela normal) e mandamos salvar no histórico.
+    async function escolherVersao(qual){
+        if(!cmpVersoes || !cmpContexto) return;
+        const escolhida = qual === 'claude' ? cmpVersoes.claude : cmpVersoes.gemini;
+        document.getElementById('cmpPainel').style.display = 'none';
+        exibirResposta(escolhida);
+        const el = document.getElementById('avisoMotor');
+        el.innerText = qual === 'claude'
+            ? '✓ Você escolheu a versão do Claude.'
+            : '✓ Você escolheu a versão do Gemini.';
+        el.style.display = 'block';
+        // Salva a versão escolhida no histórico (empilha como atendimento normal).
+        try{
+            const resp = await fetch(BASE_URL + '/api/escolher',{
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({
+                    beId: cmpContexto.beId, mensagem: cmpContexto.mensagem,
+                    opcoes: cmpContexto.opcoes, sexo: cmpContexto.sexo,
+                    idade: cmpContexto.idade, tipoDocumento: cmpContexto.tipoDocumento,
+                    resposta: escolhida, motorEscolhido: qual
+                })
+            });
+            const data = await resp.json();
+            if(data._historicoSalvo === false){
+                const aviso = document.getElementById('avisoHistorico');
+                aviso.innerText = '⚠️ A versão foi escolhida, mas não foi possível salvar no histórico agora. Copie o que precisar antes de sair.';
+                aviso.style.display = 'block';
+            }
+            carregarRecentes();
+        }catch(e){ /* salvar é secundário; o documento já está na tela */ }
     }
 
     // ---- Lista de recentes (vinda do servidor: só BE + sexo + idade) ----
@@ -465,6 +545,7 @@
             relatorio: document.getElementById('chkRelatorio').checked,
             correcao: document.getElementById('chkCorrecao').checked,
             buscarFontes: document.getElementById('chkBuscar').checked,
+            compararIAs: document.getElementById('chkComparar').checked,
             medicarUpa: document.getElementById('chkMedicarUpa').checked,
             exameUnidade: document.getElementById('chkExameUnidade').checked,
             exameExterno: document.getElementById('chkExameExterno').checked
@@ -472,9 +553,11 @@
         if(!beId || !mensagem){ alert('Preencha o Número do BE e o Relato.'); return; }
 
         btn.disabled = true;
-        document.getElementById('loading').innerText = opcoes.buscarFontes
-            ? '🔎 Buscando em fontes confiáveis (pode demorar um pouco mais)...'
-            : '🧠 Processando raciocínio e documentos...';
+        document.getElementById('loading').innerText = opcoes.compararIAs
+            ? '⚖️ Gerando nas duas IAs e comparando (demora um pouco mais)...'
+            : (opcoes.buscarFontes
+                ? '🔎 Buscando em fontes confiáveis (pode demorar um pouco mais)...'
+                : '🧠 Processando raciocínio e documentos...');
         document.getElementById('loading').style.display = 'block';
         document.getElementById('resDiscussao').innerText = 'Analisando caso...';
         ['docPresc','docDiluicao','docReceita','docRelatorio','docExameUnidade','docExameExterno','cidWrap','docEvolucao'].forEach(id=>{
@@ -484,6 +567,9 @@
         document.getElementById('btnCopiarTudo').style.display='none';
         document.getElementById('timelineWrap').style.display='none';
         document.getElementById('avisoHistorico').style.display='none';
+        document.getElementById('avisoMotor').style.display='none';
+        document.getElementById('cmpPainel').style.display='none';
+        cmpVersoes = null; cmpContexto = null;
 
         try{
             const resp = await fetch(API_URL,{
@@ -493,14 +579,27 @@
             });
             const data = await resp.json();
             if(data.erro){ alert('Erro: '+data.erro); }
+            else if(data._comparacao){
+                // MODO COMPARAÇÃO (etapa 1): mostra o resumo das diferenças e os
+                // dois botões. Guarda as versões e o contexto para a escolha.
+                cmpVersoes = { gemini: data.versaoGemini, claude: data.versaoClaude };
+                cmpContexto = { beId, mensagem, opcoes, sexo, idade, tipoDocumento: tipoAtual };
+                document.getElementById('resDiscussao').innerText = 'Compare as duas versões acima e escolha uma para trabalhar.';
+                document.getElementById('cmpResumo').innerText = data.resumoDiferencas || '';
+                document.getElementById('cmpPainel').style.display = 'block';
+            }
             else{
                 exibirResposta(data);
+                mostrarAvisoMotor(data);
                 carregarRecentes();
                 // Feedback do histórico: avisa só quando NÃO salvou (caso contrário
                 // não polui a tela). Se não salvou, reabrir este BE pode não funcionar.
                 if(data._historicoSalvo === false){
                     const aviso = document.getElementById('avisoHistorico');
-                    if(aviso){ aviso.style.display = 'block'; }
+                    if(aviso){
+                        aviso.innerText = '⚠️ Atenção: o documento foi gerado, mas NÃO foi possível salvar no histórico agora (banco indisponível). Reabrir este BE pode não funcionar. Copie o que precisar antes de sair.';
+                        aviso.style.display = 'block';
+                    }
                 }
             }
         }catch(e){
