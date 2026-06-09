@@ -33,6 +33,10 @@
         background:var(--box); color:var(--texto); border:1px solid var(--line);
         border-radius:5px; padding:9px; width:100%; font-family:inherit; font-size:14px;}
     textarea{min-height:90px; resize:vertical;}
+    /* Caixa principal do relato: 2,5x a altura padrão (90px -> 225px) para
+       evitar ter de rolar dentro dela ao escrever o caso. resize:vertical
+       continua permitindo ajustar manualmente. */
+    #mensagem{min-height:225px;}
     .grid-3{display:grid; grid-template-columns:1.4fr 1fr 1fr; gap:10px; margin-bottom:12px;}
     .grid-2{display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:12px;}
     .btn-main{background:var(--azul); color:#fff; border:none; padding:14px; border-radius:5px;
@@ -98,6 +102,10 @@
     .box{white-space:pre-wrap; background:var(--box); padding:13px; font-family:monospace; font-size:13px;
         line-height:1.55; border-left:4px solid var(--azul); color:var(--texto);}
     .box-discussao{border-left-color:var(--amarelo); color:var(--disc-txt);}
+    .alerta-vermelho{background:#b71c1c; color:#fff; border:2px solid #ff5252; border-radius:8px;
+        padding:12px 14px; margin-bottom:12px; font-family:monospace; font-size:13.5px;
+        font-weight:bold; line-height:1.55; white-space:pre-wrap; letter-spacing:.3px;
+        box-shadow:0 0 0 3px rgba(255,82,82,.25);}
     .box-vitais{border-left-color:#888; color:var(--vital-txt); font-size:14px;}
     .box-diluicao{border-left-color:#29b6f6; color:var(--dil-txt); font-size:12.5px;}
     .box-evolucao{border-left-color:var(--verde);}
@@ -249,6 +257,8 @@
         ⚠️ <strong>Atenção:</strong> o documento foi gerado, mas NÃO foi possível salvar no histórico agora (banco de histórico indisponível). Reabrir este BE pelo número ou pelos recentes pode não funcionar. O documento atual está normal — copie o que precisar antes de sair.
     </div>
 
+    <div id="alertaVermelho" class="alerta-vermelho" style="display:none;"></div>
+
     <div class="doc" id="docDiscussao" style="display:block;">
         <div class="doc-head"><h3>💡 Discussão de Retaguarda</h3></div>
         <div id="resDiscussao" class="box box-discussao">Aguardando entrada de dados...</div>
@@ -379,8 +389,35 @@
         });
     }
 
+    // Separa o bloco de ALERTA DE SALA VERMELHA (marcado com [[VERMELHO]] pela IA)
+    // do resto da discussão, e o mostra em destaque vermelho no topo. O marcador
+    // some do texto exibido. Se não houver marcador, o alerta fica oculto.
+    function renderDiscussao(texto){
+        const alertaEl = document.getElementById('alertaVermelho');
+        const discEl = document.getElementById('resDiscussao');
+        const t = texto || 'Nenhuma discussão gerada.';
+        const idx = t.indexOf('[[VERMELHO]]');
+        if(idx === -1){
+            alertaEl.style.display = 'none';
+            alertaEl.innerText = '';
+            discEl.innerText = t;
+            return;
+        }
+        // O bloco vermelho vai do marcador até a primeira linha em branco dupla
+        // (ou até o fim, se não houver). O resto continua na discussão normal.
+        const resto = t.slice(idx + '[[VERMELHO]]'.length);
+        const corte = resto.indexOf('\n\n');
+        const blocoVermelho = (corte === -1 ? resto : resto.slice(0, corte)).trim();
+        const antes = t.slice(0, idx).trim();
+        const depois = (corte === -1 ? '' : resto.slice(corte)).trim();
+        alertaEl.style.display = 'block';
+        alertaEl.innerText = '🚨 ' + blocoVermelho;
+        const restante = [antes, depois].filter(Boolean).join('\n\n');
+        discEl.innerText = restante || 'Veja o alerta de gravidade acima.';
+    }
+
     function exibirResposta(data){
-        document.getElementById('resDiscussao').innerText = data.discussao || 'Nenhuma discussão gerada.';
+        renderDiscussao(data.discussao);
         setBox('cidWrap','resCid', data.cid);
         document.getElementById('cidWrap').style.display = (data.cid && data.cid.trim()) ? 'block':'none';
         setBox('docEvolucao','resEvolucao', data.evolucao);
@@ -486,6 +523,7 @@
         const wrapTimeline = document.getElementById('timelineWrap');
         const elTl = document.getElementById('timeline');
         document.getElementById('resDiscussao').innerText = 'Buscando caso anterior...';
+        document.getElementById('alertaVermelho').style.display = 'none';
         wrapTimeline.style.display = 'none';
         try{
             const resp = await fetch(BASE_URL + '/api/timeline/' + encodeURIComponent(be));
@@ -565,6 +603,7 @@
         });
         document.getElementById('grupoProntuario').innerHTML='';
         document.getElementById('btnCopiarTudo').style.display='none';
+        document.getElementById('alertaVermelho').style.display='none';
         document.getElementById('timelineWrap').style.display='none';
         document.getElementById('avisoHistorico').style.display='none';
         document.getElementById('avisoMotor').style.display='none';
@@ -638,13 +677,32 @@
     // NÃO inclui prescrição, diluição, receita, relatório nem exames.
     function copiarProntuarioInteiro(btn){
         const partes = [];
-        CAMPOS_PRONT.forEach((c,i)=>{
-            const el = document.getElementById('pront_'+i);
-            if(el && el.innerText.trim()){
-                partes.push(c.tituloCopia + '\n' + el.innerText.trim());
+        // CASO EVOLUÇÃO: existe texto de evolução -> junta EVOLUÇÃO + CONDUTA
+        // (numa evolução não há história clínica/pregressa/exame de admissão).
+        const elEvol = document.getElementById('resEvolucao');
+        const docEvol = document.getElementById('docEvolucao');
+        const temEvolucao = docEvol && docEvol.style.display !== 'none'
+            && elEvol && elEvol.innerText.trim();
+        if(temEvolucao){
+            partes.push('EVOLUÇÃO\n' + elEvol.innerText.trim());
+            // pega a conduta (último campo de CAMPOS_PRONT) se estiver preenchida
+            const idxConduta = CAMPOS_PRONT.findIndex(c => c.key === 'conduta');
+            if(idxConduta !== -1){
+                const elCond = document.getElementById('pront_'+idxConduta);
+                if(elCond && elCond.innerText.trim()){
+                    partes.push('CONDUTAS\n' + elCond.innerText.trim());
+                }
             }
-        });
-        if(partes.length === 0){ alert('Nada para copiar ainda. Gere um prontuário primeiro.'); return; }
+        } else {
+            // CASO PRONTUÁRIO: junta os 6 campos na ordem do SIGRAH (como antes).
+            CAMPOS_PRONT.forEach((c,i)=>{
+                const el = document.getElementById('pront_'+i);
+                if(el && el.innerText.trim()){
+                    partes.push(c.tituloCopia + '\n' + el.innerText.trim());
+                }
+            });
+        }
+        if(partes.length === 0){ alert('Nada para copiar ainda. Gere um documento primeiro.'); return; }
         const texto = partes.join('\n\n');
         if(navigator.clipboard && window.isSecureContext){
             navigator.clipboard.writeText(texto).then(()=>efeito(btn)).catch(()=>copiarTextoFallback(texto,btn));
@@ -664,7 +722,10 @@
     function atualizarBotaoCopiarTudo(){
         const unidade = document.getElementById('unidade').value;
         const btn = document.getElementById('btnCopiarTudo');
-        const temConteudo = document.getElementById('grupoProntuario').children.length > 0;
+        const temProntuario = document.getElementById('grupoProntuario').children.length > 0;
+        const docEvol = document.getElementById('docEvolucao');
+        const temEvolucao = docEvol && docEvol.style.display !== 'none';
+        const temConteudo = temProntuario || temEvolucao;
         btn.style.display = (unidade === 'ACRIZIO' && temConteudo) ? 'inline-block' : 'none';
     }
     document.getElementById('unidade').addEventListener('change', atualizarBotaoCopiarTudo);
