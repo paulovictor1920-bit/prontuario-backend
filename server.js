@@ -207,7 +207,34 @@ function pareceMedicacao(linha) {
     return /\d+\s*(mg|ml|mcg|g|ui|gota|comp|cp|amp|frasco)/i.test(linha);
 }
 
-// REDE DE SEGURANÇA: confere se remédios prescritos não estão na farmácia.
+// PREFERÊNCIA DE TERMO: o médico prefere "inalação" a "nebulização" para
+// broncodilatadores (salbutamol/fenoterol/ipratrópio etc.). A IA às vezes
+// insiste em "nebulização". Esta função troca a palavra na saída — cinto e
+// suspensório, além da instrução no prompt. Troca só a forma da palavra,
+// preservando o resto do texto (maiúsc./minúsc. aproximada).
+function preferirInalacao(txt) {
+    if (!txt || typeof txt !== 'string') return txt;
+    return txt
+        .replace(/nebuliza[çc][ãa]o/gi, (m) => (m[0] === m[0].toUpperCase() ? 'Inalação' : 'inalação'))
+        .replace(/nebuliza[çc][õo]es/gi, (m) => (m[0] === m[0].toUpperCase() ? 'Inalações' : 'inalações'))
+        .replace(/nebulizar/gi, (m) => (m[0] === m[0].toUpperCase() ? 'Inalar' : 'inalar'))
+        .replace(/nebulizad[ao]s?/gi, (m) => (m[0] === m[0].toUpperCase() ? 'Inalado' : 'inalado'));
+}
+
+// REDE DE SEGURANÇA (LEMBRETE GROSSEIRO, não confiável): tenta sinalizar
+// remédios prescritos que talvez não estejam na farmácia da unidade. É um
+// auxiliar de memória, NÃO uma verificação confiável: pode deixar passar item
+// fora da lista (falso negativo) e pode alertar à toa (falso positivo). A
+// conferência de verdade é sempre a sua, lendo a padronização.
+//
+// Melhorias frente à versão anterior (reduzir falso-alarme):
+//  - casa por PALAVRA INTEIRA do princípio (não por "contém"), o que evita
+//    casamentos espúrios entre nomes parecidos;
+//  - ignora linhas que são claramente soro/diluente/veículo (SF, SG, água
+//    destilada, ABD), que não são "medicação fora da lista";
+//  - ignora linhas que são POSOLOGIA/INSTRUÇÃO de uso (começam com "Tomar",
+//    "Inalar", "Aplicar"...), que não trazem o NOME do fármaco e geravam
+//    alarme falso (ex.: "Tomar 20 gotas de 6/6h").
 function conferirMedicamentos(texto, listaUnidade) {
     if (!texto) return [];
     const principios = new Set();
@@ -215,11 +242,21 @@ function conferirMedicamentos(texto, listaUnidade) {
         const p = semAcento(item.nome).split(/[\s0-9]/)[0];
         if (p && p.length > 3) principios.add(p);
     });
+    // Veículos/diluentes que NÃO devem disparar alerta de "fora da padronização".
+    const ehVeiculo = (linha) => /(soro fisiol|\bsf\b|\bsg\b|glicos|cloreto de sodio|agua destil|\babd\b|ringer)/i.test(linha);
+    // Linhas de POSOLOGIA/INSTRUÇÃO (começam com verbo de uso): não contêm o nome
+    // do remédio, então NÃO devem ser conferidas (eram a causa do alarme falso).
+    const ehPosologia = (linha) => /^\s*(tomar|inalar|aplicar|usar|pingar|fazer|repetir|administrar|instilar|diluir|manter|reavaliar|associar|suspender|iniciar|continuar|via|posologia|uso\b)/i.test(semAcento(linha));
+
     const alertas = [];
     texto.split('\n').forEach(linha => {
         if (!pareceMedicacao(linha)) return;
-        const m = semAcento(linha);
-        if (![...principios].some(p => m.includes(p))) {
+        if (ehVeiculo(semAcento(linha))) return;
+        if (ehPosologia(linha)) return;
+        const palavras = semAcento(linha).split(/[^a-z]+/).filter(Boolean);
+        // casa se ALGUMA palavra inteira da linha for um princípio conhecido
+        const conhecido = palavras.some(w => principios.has(w));
+        if (!conhecido) {
             const t = linha.trim();
             if (t) alertas.push(t);
         }
@@ -515,6 +552,10 @@ REGRA ABSOLUTA DE FIDELIDADE AO RELATO:
   relatada, dose perigosa, contraindicação) — NUNCA pela simples ausência no SUS.
 - Respeite literalmente o que o médico pediu, trocou ou proibiu na receita
   domiciliar. Se ele disse "não trocar" ou "manter", mantenha exatamente.
+- TERMINOLOGIA: para broncodilatadores administrados por via inalatória
+  (salbutamol, fenoterol, ipratrópio e combinações), use SEMPRE o termo
+  "inalação" (ou "inalar"), NUNCA "nebulização"/"nebulizar". Ex.: escreva
+  "Inalação com salbutamol + ipratrópio", não "Nebulização com...".
 - Não invente comorbidades, alergias ou achados de exame não relatados. Quando
   um dado não foi informado, registre como "não informado" ou deixe em branco.
 
@@ -560,6 +601,30 @@ INSTRUÇÕES DE CADA CAMPO:
    possibilidade para confirmar. Ex.: "⚕️ Uso contínuo de ácido valproico sugere
    epilepsia/transtorno do humor não citado na pregressa — confirmar." NÃO faça
    isso se a doença já constar na pregressa (não repita o óbvio nem gaste espaço).
+   ALERTA DE GRAVIDADE / SALA VERMELHA (Protocolo de Manchester): este médico
+   atende APENAS fichas VERDE e AMARELA. Avalie SE, pelos dados do relato, o
+   paciente apresenta algum DISCRIMINADOR de Manchester de alta prioridade que
+   justifique reclassificação para LARANJA/VERMELHO (urgência/emergência) e
+   transferência para a sala vermelha — por ex.: comprometimento de via aérea,
+   estridor, SpO2 baixa, dispneia grave, dor torácica de alto risco, sinais de
+   choque/hipotensão, alteração aguda do nível de consciência, glicemia muito
+   alterada, déficit neurológico agudo, dor severa (escala alta), sangramento
+   exsanguinante, convulsão ativa, etc. REGRA: só inclua este alerta SE houver
+   um red flag REAL nos dados informados. Se NÃO houver, NÃO escreva nada sobre
+   isso (não gaste espaço nem crie alarme). QUANDO houver, escreva no INÍCIO da
+   "discussao" um bloco EM CAIXA ALTA começando EXATAMENTE com o marcador
+   "[[VERMELHO]]" (o sistema usa isso para destacar), contendo: (a) o
+   DISCRIMINADOR de Manchester aplicável; (b) os SINAIS OBJETIVOS do próprio
+   paciente que o sustentam (citando os valores/achados do relato); (c) uma
+   JUSTIFICATIVA CLÍNICA curta para a transferência. MODELO:
+   "[[VERMELHO]] POSSÍVEL CASO DE SALA VERMELHA — REAVALIAR CLASSIFICAÇÃO.
+   DISCRIMINADOR (MANCHESTER): DISPNEIA AGUDA / SATURAÇÃO BAIXA.
+   SINAIS NO PACIENTE: SPO2 88% EM AR AMBIENTE, FR 32, USO DE MUSCULATURA ACESSÓRIA.
+   JUSTIFICATIVA: INSUFICIÊNCIA RESPIRATÓRIA EM CURSO; NECESSITA SUPORTE E
+   MONITORIZAÇÃO DE EMERGÊNCIA, INCOMPATÍVEL COM ÁREA VERDE/AMARELA."
+   IMPORTANTE: baseie-se SOMENTE nos dados que o médico informou; você NÃO
+   examina o paciente. Encerre o bloco com: "(BASEADO APENAS NO RELATO —
+   CONFIRMAR À BEIRA DO LEITO.)"
 
 2. "cid": APENAS o(s) código(s) CID e descrição. Ex: "J00 - Nasofaringite aguda".
    Nada além disso neste campo.
@@ -675,6 +740,15 @@ ${mensagem}`;
             if (!dados.prontuario) dados.prontuario = {};
             if (typeof dados.evolucao !== 'string') dados.evolucao = '';
 
+            // --- Preferência de termo: "inalação" em vez de "nebulização" ---
+            dados.evolucao = preferirInalacao(dados.evolucao);
+            dados.prescricao_interna = preferirInalacao(dados.prescricao_interna);
+            dados.receita = preferirInalacao(dados.receita);
+            if (dados.prontuario) {
+                dados.prontuario.conduta = preferirInalacao(dados.prontuario.conduta);
+                dados.prontuario.exame_fisico_texto = preferirInalacao(dados.prontuario.exame_fisico_texto);
+            }
+
             // --- TRAVAS DE SEGURANÇA (servidor manda, não a IA) ---
             if (!op.relatorio) dados.relatorio = '';
             if (!exameUnidade) dados.exame_unidade = '';
@@ -686,7 +760,7 @@ ${mensagem}`;
             const textoConferir = [dados.prescricao_interna, dados.receita].filter(Boolean).join('\n');
             const alertas = conferirMedicamentos(textoConferir, listaUnidade);
             if (alertas.length > 0) {
-                const aviso = '\n\n⚠️ CONFERÊNCIA AUTOMÁTICA (confira pessoalmente): possivelmente fora da padronização desta unidade:\n- '
+                const aviso = '\n\n⚠️ LEMBRETE (verificação grosseira — NÃO confiável; confira você mesmo na padronização): possíveis itens fora da lista desta unidade:\n- '
                     + alertas.join('\n- ');
                 dados.discussao = (dados.discussao || '') + aviso;
             }
