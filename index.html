@@ -118,6 +118,28 @@
     .btn-copiar:hover{background:var(--verde); color:#fff;}
     .loading{display:none; color:var(--azul); font-weight:bold; text-align:center; margin:10px 0;}
     .nota{font-size:11px; color:var(--nota); margin-top:4px;}
+    /* ---- Anexos de fotos/documentos ---- */
+    .anexos-wrap{background:var(--box); border:1px solid var(--line); border-radius:8px;
+        padding:12px 14px; margin-bottom:12px;}
+    .anexos-top{display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap;}
+    .anexos-top .lbl{font-weight:bold; font-size:14px; color:var(--titulo);}
+    .btn-anexo{background:transparent; color:var(--azul); border:1px solid var(--azul);
+        padding:7px 11px; border-radius:5px; cursor:pointer; font-size:12.5px; font-weight:bold; transition:.15s;}
+    .btn-anexo:hover{background:var(--azul); color:#fff;}
+    .anexos-lista{display:flex; flex-wrap:wrap; gap:10px; margin-top:10px;}
+    .anexo-thumb{position:relative; width:84px; height:84px; border:2px solid var(--line);
+        border-radius:8px; overflow:hidden;}
+    .anexo-thumb img{width:100%; height:100%; object-fit:cover; display:block;}
+    .anexo-thumb .origem{position:absolute; left:3px; bottom:3px; background:rgba(0,0,0,.65);
+        color:#fff; font-size:10.5px; padding:1px 5px; border-radius:8px;}
+    .anexo-thumb .remover{position:absolute; right:3px; top:3px; background:#b71c1c; color:#fff;
+        border:none; width:20px; height:20px; border-radius:50%; cursor:pointer; font-size:12px;
+        line-height:18px; padding:0;}
+    .aviso-fotos{background:#1f4d2e; color:#fff; border-radius:6px; padding:8px 12px;
+        margin-top:10px; font-size:13px; display:none;}
+    .codigo-destaque{font-size:22px; letter-spacing:6px; font-weight:bold; display:block; margin-top:4px;}
+    .ponte-row{display:flex; gap:8px; margin-top:10px; align-items:center; flex-wrap:wrap;}
+    #codigoPonte{width:110px; text-align:center; font-weight:bold; letter-spacing:4px; font-size:16px;}
 </style>
 </head>
 <body>
@@ -184,6 +206,28 @@
     <div class="field-mb">
         <label for="mensagem">Relato Clínico ou Dúvida:</label>
         <textarea id="mensagem" placeholder="Paciente com cefaleia unilateral pulsátil há 6h..."></textarea>
+    </div>
+
+    <!-- ANEXOS: fotos de documentos (exames, prontuários antigos, evoluções).
+         A IA só usa as fotos conforme a instrução escrita no relato.
+         PONTE POR CÓDIGO: no celular, anexe as fotos e toque em "Gerar
+         código" — aparece um código de 4 dígitos (vale 30 min, uso único).
+         No outro aparelho, digite o código e toque em "Receber": as fotos
+         chegam anexadas, sem precisar do BE e sem recarregar a página. -->
+    <div class="anexos-wrap">
+        <div class="anexos-top">
+            <span class="lbl">📎 Fotos de documentos (até 9)</span>
+            <button class="btn-anexo" onclick="document.getElementById('inputFoto').click()">📷 Anexar foto</button>
+        </div>
+        <input type="file" id="inputFoto" accept="image/*" multiple style="display:none" onchange="anexarLocais(this.files)">
+        <div class="anexos-lista" id="listaAnexos"></div>
+        <div id="avisoFotos" class="aviso-fotos"></div>
+        <div class="ponte-row">
+            <button class="btn-anexo" id="btnPonte" style="display:none;" onclick="gerarCodigoPonte()">📤 Gerar código para outro aparelho</button>
+            <input type="text" id="codigoPonte" maxlength="4" inputmode="numeric" placeholder="0000">
+            <button class="btn-anexo" onclick="receberPorCodigo()">🔑 Receber por código</button>
+        </div>
+        <div class="nota">A IA só usa as fotos conforme a sua instrução no relato (ex.: "transcreva o hemograma da foto no prontuário"). A foto nunca vira documento sozinha, não entra no histórico e é apagada do servidor ao ser recebida. <strong>No celular:</strong> anexe as fotos e toque em "📤 Gerar código" — anote o código de 4 dígitos. <strong>No computador:</strong> digite o código e toque em "🔑 Receber". Cada código vale 30 minutos e funciona uma única vez.</div>
     </div>
 
     <div class="toggle-upa">
@@ -324,6 +368,192 @@
 
     let tipoAtual = 'prontuario';
 
+    // ---- SENHA DE ACESSO ----
+    // Pedida uma vez por plantão e guardada só na SESSÃO do navegador (some ao
+    // fechar). Vai em todo pedido no cabeçalho "x-senha"; o servidor confere
+    // com a variável SENHA_ACESSO do Render. Se a senha estiver errada, o
+    // servidor responde 401 e a tela pede de novo.
+    let SENHA = sessionStorage.getItem('senhaAcesso') || '';
+    function pedirSenha(motivo){
+        const s = prompt((motivo || 'Digite a senha de acesso do Prontuário Rápido') + ':');
+        SENHA = (s || '').trim();
+        if(SENHA) sessionStorage.setItem('senhaAcesso', SENHA);
+        return SENHA;
+    }
+    // Envolve o fetch: injeta a senha e, se o servidor recusar (401), pede a
+    // senha de novo e tenta UMA segunda vez automaticamente.
+    async function fetchAPI(url, opts, jaTentou){
+        opts = opts || {};
+        opts.headers = Object.assign({}, opts.headers || {}, {'x-senha': SENHA});
+        const resp = await fetch(url, opts);
+        if(resp.status === 401 && !jaTentou){
+            pedirSenha('Senha ausente ou incorreta. Digite a senha de acesso');
+            return fetchAPI(url, opts, true);
+        }
+        return resp;
+    }
+
+    // ---- FOTOS/ANEXOS DE DOCUMENTOS ----
+    // Cada anexo: { id, mimeType, data (base64 sem prefixo), origem:'local'|'celular' }
+    // 'local'   = anexada neste aparelho (vai direto no próximo envio).
+    // 'celular' = recebida pela ponte (código de 4 dígitos de outro aparelho).
+    const MAX_ANEXOS = 9;
+    let anexos = [];
+
+    function renderAnexos(){
+        const wrap = document.getElementById('listaAnexos');
+        wrap.innerHTML = '';
+        anexos.forEach(a=>{
+            const d = document.createElement('div');
+            d.className = 'anexo-thumb';
+            const img = document.createElement('img');
+            img.src = 'data:' + a.mimeType + ';base64,' + a.data;
+            d.appendChild(img);
+            const tag = document.createElement('span');
+            tag.className = 'origem';
+            tag.innerText = a.origem === 'celular' ? '🔑' : '📎';
+            d.appendChild(tag);
+            const x = document.createElement('button');
+            x.className = 'remover'; x.innerText = '✕'; x.title = 'Remover esta foto';
+            x.onclick = ()=> removerAnexo(a.id);
+            d.appendChild(x);
+            wrap.appendChild(d);
+        });
+        // O botão da ponte só aparece quando há fotos LOCAIS para mandar.
+        document.getElementById('btnPonte').style.display =
+            anexos.some(a=>a.origem==='local') ? 'inline-block' : 'none';
+    }
+    let avisoTimer = null;
+    function avisoFotos(txt, fixo, html){
+        const el = document.getElementById('avisoFotos');
+        if(avisoTimer){ clearTimeout(avisoTimer); avisoTimer = null; }
+        if(!txt){ el.style.display='none'; return; }
+        if(html){ el.innerHTML = txt; } else { el.innerText = txt; }
+        el.style.display='block';
+        // "fixo" = fica na tela (usado para mostrar o CÓDIGO até você anotar).
+        if(!fixo){ avisoTimer = setTimeout(()=>{ el.style.display='none'; }, 8000); }
+    }
+    function removerAnexo(id){
+        // Só remove daqui: fotos recebidas por código já foram apagadas do
+        // servidor na entrega (código de uso único).
+        anexos = anexos.filter(x=>x.id!==id);
+        renderAnexos();
+    }
+
+    // Comprime a imagem no próprio navegador (máx. 1600px no lado maior, JPEG
+    // ~82%): foto de celular tem 3–5 MB; vira ~300–500 KB sem perder a leitura
+    // do texto. Economiza banco, internet do plantão e cota das IAs.
+    function comprimirImagem(file){
+        return new Promise((resolve, reject)=>{
+            const leitor = new FileReader();
+            leitor.onerror = ()=> reject(new Error('leitura'));
+            leitor.onload = ()=>{
+                const img = new Image();
+                img.onerror = ()=> reject(new Error('formato'));
+                img.onload = ()=>{
+                    // Passada normal: 1600px no lado maior, qualidade 82% —
+                    // texto de exame continua perfeitamente legível.
+                    function gerar(maxLado, qualidade){
+                        let w = img.width, h = img.height;
+                        if(w > maxLado || h > maxLado){
+                            const f = maxLado / Math.max(w, h);
+                            w = Math.round(w*f); h = Math.round(h*f);
+                        }
+                        const cv = document.createElement('canvas');
+                        cv.width = w; cv.height = h;
+                        cv.getContext('2d').drawImage(img, 0, 0, w, h);
+                        return cv.toDataURL('image/jpeg', qualidade).split(',')[1];
+                    }
+                    let b64 = gerar(1600, 0.82);
+                    // Segurança: se ALGUMA foto sair acima de ~950 KB (limite
+                    // por gravação do banco gratuito), refaz um pouco menor.
+                    if(b64.length > 950000){ b64 = gerar(1400, 0.72); }
+                    if(b64.length > 950000){ b64 = gerar(1200, 0.65); }
+                    resolve(b64);
+                };
+                img.src = leitor.result;
+            };
+            leitor.readAsDataURL(file);
+        });
+    }
+    async function anexarLocais(files){
+        for(const f of Array.from(files || [])){
+            if(anexos.length >= MAX_ANEXOS){ alert('Máximo de ' + MAX_ANEXOS + ' fotos por envio.'); break; }
+            try{
+                const b64 = await comprimirImagem(f);
+                anexos.push({
+                    id: 'L' + Date.now().toString(36) + Math.random().toString(36).slice(2,6),
+                    mimeType: 'image/jpeg', data: b64, origem: 'local'
+                });
+            }catch(e){
+                alert('Não consegui ler "' + f.name + '". Se for HEIC (iPhone), use uma captura de tela ou mude a câmera para "Mais compatível" (JPEG).');
+            }
+        }
+        document.getElementById('inputFoto').value = '';
+        renderAnexos();
+    }
+
+    // PONTE (etapa 1 — feita no celular): manda as fotos LOCAIS para o
+    // servidor num pedido só e recebe um CÓDIGO de 4 dígitos, mostrado em
+    // destaque na tela. As fotos saem da lista deste aparelho (passam a
+    // "morar" no servidor por até 30 min, até alguém digitar o código).
+    // NÃO precisa de BE: o código é o elo entre os dois aparelhos.
+    async function gerarCodigoPonte(){
+        const locais = anexos.filter(a=>a.origem==='local');
+        if(locais.length === 0){ alert('Anexe as fotos primeiro.'); return; }
+        avisoFotos('⏳ Enviando ' + locais.length + ' foto(s) e gerando o código...', true);
+        try{
+            const resp = await fetchAPI(BASE_URL + '/api/ponte', { method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body: JSON.stringify({ fotos: locais.map(a=>({ mimeType: a.mimeType, data: a.data })) }) });
+            const d = await resp.json();
+            if(d.ok && d.codigo){
+                anexos = anexos.filter(a=>a.origem!=='local');
+                renderAnexos();
+                avisoFotos('✓ ' + d.fotos + ' foto(s) guardada(s). Código (vale 30 min, uso único):'
+                    + '<span class="codigo-destaque">' + d.codigo + '</span>'
+                    + 'No outro aparelho, digite o código e toque em 🔑 Receber.', true, true);
+            } else {
+                avisoFotos('');
+                alert('Erro: ' + (d.erro || 'não foi possível gerar o código.'));
+            }
+        }catch(e){
+            avisoFotos('');
+            alert('Erro de conexão ao enviar as fotos.');
+        }
+    }
+
+    // PONTE (etapa 2 — feita no outro aparelho): digita o código de 4 dígitos
+    // e recebe as fotos anexadas aqui — SEM recarregar a página (o que você
+    // está digitando continua intacto). O servidor apaga as fotos na entrega.
+    async function receberPorCodigo(){
+        const campo = document.getElementById('codigoPonte');
+        const codigo = (campo.value || '').trim();
+        if(!/^[0-9]{4}$/.test(codigo)){ alert('Digite o código de 4 números mostrado no outro aparelho.'); return; }
+        try{
+            const resp = await fetchAPI(BASE_URL + '/api/ponte/' + codigo);
+            const d = await resp.json();
+            if(d.erro){ alert(d.erro); return; }
+            const fotos = d.fotos || [];
+            let novas = 0;
+            fotos.forEach(f=>{
+                if(anexos.length >= MAX_ANEXOS) return;
+                anexos.push({
+                    id: 'C' + Date.now().toString(36) + Math.random().toString(36).slice(2,6),
+                    mimeType: f.mimeType, data: f.data, origem: 'celular'
+                });
+                novas++;
+            });
+            campo.value = '';
+            if(novas > 0){
+                renderAnexos();
+                avisoFotos('📩 ' + novas + ' foto(s) recebida(s) — serão usadas no próximo envio. (Se a página recarregar antes do envio, gere um novo código no celular.)');
+            } else {
+                alert('O código existia, mas não havia fotos válidas (ou o limite de ' + MAX_ANEXOS + ' anexos já foi atingido).');
+            }
+        }catch(e){ alert('Erro de conexão ao receber as fotos.'); }
+    }
+
     // Estado da comparação: guarda as duas versões e o contexto do pedido,
     // para quando o médico escolher uma delas (e aí salvar no histórico).
     let cmpVersoes = null;      // { gemini:{...}, claude:{...} }
@@ -461,7 +691,7 @@
         el.style.display = 'block';
         // Salva a versão escolhida no histórico (empilha como atendimento normal).
         try{
-            const resp = await fetch(BASE_URL + '/api/escolher',{
+            const resp = await fetchAPI(BASE_URL + '/api/escolher',{
                 method:'POST',
                 headers:{'Content-Type':'application/json'},
                 body: JSON.stringify({
@@ -487,7 +717,7 @@
     async function carregarRecentes(){
         const wrap = document.getElementById('recentes');
         try{
-            const resp = await fetch(BASE_URL + '/api/recentes');
+            const resp = await fetchAPI(BASE_URL + '/api/recentes');
             const data = await resp.json();
             const lista = (data.recentes||[]);
             if(lista.length === 0){ wrap.innerHTML = '<span class="chip-vazio">Nenhum atendimento recente.</span>'; return; }
@@ -526,7 +756,7 @@
         document.getElementById('alertaVermelho').style.display = 'none';
         wrapTimeline.style.display = 'none';
         try{
-            const resp = await fetch(BASE_URL + '/api/timeline/' + encodeURIComponent(be));
+            const resp = await fetchAPI(BASE_URL + '/api/timeline/' + encodeURIComponent(be));
             const data = await resp.json();
             if(data.erro){ document.getElementById('resDiscussao').innerText = data.erro; return; }
             const etapas = data.etapas || [];
@@ -590,12 +820,18 @@
         };
         if(!beId || !mensagem){ alert('Preencha o Número do BE e o Relato.'); return; }
 
+        // Fotos anexadas: vão junto do pedido (tanto as deste aparelho quanto
+        // as recebidas por código — a essa altura, todas já estão só aqui).
+        const imagens = anexos.map(a=>({ mimeType: a.mimeType, data: a.data }));
+
         btn.disabled = true;
-        document.getElementById('loading').innerText = opcoes.compararIAs
+        let txtLoading = opcoes.compararIAs
             ? '⚖️ Gerando nas duas IAs e comparando (demora um pouco mais)...'
             : (opcoes.buscarFontes
                 ? '🔎 Buscando em fontes confiáveis (pode demorar um pouco mais)...'
                 : '🧠 Processando raciocínio e documentos...');
+        if(imagens.length > 0){ txtLoading += ' 📷 Lendo ' + imagens.length + ' foto(s).'; }
+        document.getElementById('loading').innerText = txtLoading;
         document.getElementById('loading').style.display = 'block';
         document.getElementById('resDiscussao').innerText = 'Analisando caso...';
         ['docPresc','docDiluicao','docReceita','docRelatorio','docExameUnidade','docExameExterno','cidWrap','docEvolucao'].forEach(id=>{
@@ -611,16 +847,21 @@
         cmpVersoes = null; cmpContexto = null;
 
         try{
-            const resp = await fetch(API_URL,{
+            const resp = await fetchAPI(API_URL,{
                 method:'POST',
                 headers:{'Content-Type':'application/json'},
-                body: JSON.stringify({beId,mensagem,unidade,opcoes,modeloId,sexo,idade,tipoDocumento:tipoAtual})
+                body: JSON.stringify({beId,mensagem,unidade,opcoes,modeloId,sexo,idade,tipoDocumento:tipoAtual,imagens})
             });
             const data = await resp.json();
-            if(data.erro){ alert('Erro: '+data.erro); }
+            if(data.erro){
+                if(data.erro === 'SENHA_INVALIDA'){ alert('Senha de acesso incorreta. Tente enviar de novo.'); }
+                else { alert('Erro: '+data.erro); }
+            }
             else if(data._comparacao){
                 // MODO COMPARAÇÃO (etapa 1): mostra o resumo das diferenças e os
                 // dois botões. Guarda as versões e o contexto para a escolha.
+                // As fotos já foram lidas pelas duas IAs: limpa os anexos.
+                anexos = []; renderAnexos();
                 cmpVersoes = { gemini: data.versaoGemini, claude: data.versaoClaude };
                 cmpContexto = { beId, mensagem, opcoes, sexo, idade, tipoDocumento: tipoAtual };
                 document.getElementById('resDiscussao').innerText = 'Compare as duas versões acima e escolha uma para trabalhar.';
@@ -628,6 +869,9 @@
                 document.getElementById('cmpPainel').style.display = 'block';
             }
             else{
+                // Documento gerado com sucesso: as fotos já cumpriram o papel
+                // (o servidor apagou da ponte as que vieram do celular).
+                anexos = []; renderAnexos();
                 exibirResposta(data);
                 mostrarAvisoMotor(data);
                 carregarRecentes();
@@ -729,6 +973,18 @@
         btn.style.display = (unidade === 'ACRIZIO' && temConteudo) ? 'inline-block' : 'none';
     }
     document.getElementById('unidade').addEventListener('change', atualizarBotaoCopiarTudo);
+
+    // ---- INÍCIO (ao abrir a página) ----
+    // 1) Pede a senha do plantão (fica só na sessão; some ao fechar o navegador).
+    // 2) Carrega a lista de recentes (CORREÇÃO: antes ela só carregava depois
+    //    do primeiro envio — os chips ficavam em "Carregando..." para sempre).
+    // Apertar Enter no campo do código também recebe as fotos.
+    document.getElementById('codigoPonte').addEventListener('keydown', function(e){
+        if(e.key === 'Enter'){ e.preventDefault(); receberPorCodigo(); }
+    });
+
+    if(!SENHA){ pedirSenha(); }
+    carregarRecentes();
 </script>
 </body>
 </html>
