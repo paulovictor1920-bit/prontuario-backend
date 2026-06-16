@@ -1,5 +1,17 @@
 // ============================================================================
-//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v3
+//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v4
+//
+//  Novidades da v4 (10/jun/2026):
+//   - SENHA DE ACESSO: toda rota /api agora exige a senha (variável de
+//     ambiente SENHA_ACESSO no Render; a tela envia no cabeçalho "x-senha").
+//   - FOTOS DE DOCUMENTOS: a tela pode anexar fotos (exames, prontuários,
+//     evoluções); a IA as lê conforme a instrução do médico. Fotos NUNCA são
+//     gravadas no histórico de 72h.
+//   - PONTE celular -> computador POR CÓDIGO: o celular "estaciona" até 9
+//     fotos no Redis (30 min) e recebe um CÓDIGO de 4 dígitos; o outro
+//     aparelho digita o código e as fotos aparecem anexadas (uso único).
+//   - buscarDiluicao corrigida: casa por PALAVRA INTEIRA (antes, substring
+//     podia associar a diluição de um fármaco parecido ao fármaco errado).
 //
 //  Novidades desta versão:
 //   - Saída do prontuário FATIADA nos campos do SIGRAH (modo Barreiro):
@@ -20,7 +32,9 @@ const { medicamentosAcrizioMenezes, medicamentosBarreiro } = require('./farmacia
 const { diluicoesBarreiro } = require('./diluicoes');
 
 const app = express();
-app.use(express.json());
+//  Limite do corpo aumentado: a tela agora pode enviar FOTOS de documentos
+//  (já comprimidas no navegador) junto com o pedido.
+app.use(express.json({ limit: '20mb' }));
 
 // ----------------------------------------------------------------------------
 //  CONFIGURAÇÕES (tudo num lugar só)
@@ -50,6 +64,29 @@ if (SITES_PERMITIDOS.length === 0) {
 } else {
     app.use(cors({ origin: SITES_PERMITIDOS }));
 }
+
+// ----------------------------------------------------------------------------
+//  SENHA DE ACESSO (protege a API contra uso por estranhos)
+// ----------------------------------------------------------------------------
+//  O CORS só barra chamadas feitas POR NAVEGADOR a partir de outros sites; quem
+//  descobrisse a URL do Render ainda conseguiria chamar a API direto (por
+//  script) e queimar os créditos pagos das IAs. Esta trava exige senha em TODA
+//  rota /api: a tela envia a senha no cabeçalho "x-senha" e o servidor confere
+//  com a variável de ambiente SENHA_ACESSO (criada no Render, nunca no código).
+//
+//  IMPORTANTE: se a variável NÃO existir, o sistema funciona ABERTO como antes
+//  (com aviso no log). Assim você pode subir este código primeiro e criar a
+//  variável depois, sem risco de ficar trancado para fora.
+if (!process.env.SENHA_ACESSO) {
+    console.error('ATENÇÃO: SENHA_ACESSO não configurada no Render. A API está ABERTA (sem senha). Crie a variável para proteger seus créditos de IA.');
+}
+function exigirSenha(req, res, next) {
+    if (!process.env.SENHA_ACESSO) return next(); // sem variável = modo aberto
+    const enviada = req.headers['x-senha'] || '';
+    if (enviada === process.env.SENHA_ACESSO) return next();
+    return res.status(401).json({ erro: 'SENHA_INVALIDA' });
+}
+app.use('/api', exigirSenha);
 
 if (!process.env.GEMINI_API_KEY) {
     console.error('ATENÇÃO: GEMINI_API_KEY não configurada no Render. A IA não vai funcionar.');
@@ -139,6 +176,113 @@ async function salvarHistorico(beId, pilha, sexo, idade, quando) {
     }
 }
 
+// ----------------------------------------------------------------------------
+//  PONTE DE FOTOS celular -> computador (temporária, no Redis, POR CÓDIGO)
+// ----------------------------------------------------------------------------
+//  O celular envia as fotos e recebe um CÓDIGO de 4 números; o outro aparelho
+//  digita o código e baixa as fotos — não precisa do BE. Tudo fica no Redis
+//  por NO MÁXIMO 30 minutos e é APAGADO assim que usado num atendimento (o
+//  TTL apaga sozinho o que sobrar). Fotos NUNCA entram no histórico de 72h.
+//
+//  IMPORTANTE (plano gratuito do Upstash): há limite de ~1 MB por gravação.
+//  Por isso, CADA FOTO fica num registro próprio ("foto:<código>:<id>") e o
+//  registro "fotos:<código>" guarda só o ÍNDICE leve (ids e metadados).
+const TEMPO_FOTO = 1800;                    // 30 minutos, em segundos
+const MAX_FOTOS_POR_CODIGO = 9;             // máximo de fotos por código
+const TIPOS_IMAGEM = ['image/jpeg', 'image/png', 'image/webp'];
+const TAMANHO_MAX_FOTO_PONTE = 1000 * 1024; // ~1 MB em base64 por foto (a tela comprime para <=950 KB; cabe na gravação de 1 MB do Upstash)
+const TAMANHO_MAX_FOTO = 2 * 1024 * 1024;   // limite por foto anexada num atendimento
+
+//  Gera um código de 4 números que ainda não esteja em uso e já cria o índice
+//  vazio (com validade de 30 min). Devolve o código ou null se não conseguir.
+async function gerarCodigoPonte() {
+    if (!redis) return null;
+    try {
+        for (let i = 0; i < 25; i++) {
+            const c = String(Math.floor(1000 + Math.random() * 9000));
+            const existe = await redis.exists('fotos:' + c);
+            if (!existe) {
+                await redis.set('fotos:' + c, JSON.stringify([]), 'EX', TEMPO_FOTO);
+                return c;
+            }
+        }
+    } catch (e) {
+        console.error('Erro ao gerar código da ponte:', e.message);
+    }
+    return null;
+}
+
+//  Lê o ÍNDICE de um código. Devolve null se o código não existe/expirou
+//  (diferente de [] = código válido, ainda sem fotos).
+async function lerIndicePonte(codigo) {
+    if (!redis) return null;
+    try {
+        const txt = await redis.get('fotos:' + codigo);
+        return txt === null ? null : JSON.parse(txt);
+    } catch (e) {
+        console.error('Erro ao ler índice da ponte:', e.message);
+        return null;
+    }
+}
+
+//  Guarda UMA foto sob um código. Devolve { id, pendentes } ou { erro }.
+async function guardarFotoPonte(codigo, mimeType, data) {
+    const indice = await lerIndicePonte(codigo);
+    if (indice === null) {
+        return { erro: 'Código inválido ou expirado (vale 30 minutos). Gere um novo código no outro aparelho.' };
+    }
+    if (indice.length >= MAX_FOTOS_POR_CODIGO) {
+        return { erro: 'Este código já tem ' + MAX_FOTOS_POR_CODIGO + ' fotos (limite). Gere um novo código para enviar mais.' };
+    }
+    try {
+        const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+        await redis.set('foto:' + codigo + ':' + id, data, 'EX', TEMPO_FOTO);
+        indice.push({ id, mimeType, quando: Date.now() });
+        await redis.set('fotos:' + codigo, JSON.stringify(indice), 'EX', TEMPO_FOTO);
+        return { id, pendentes: indice.length };
+    } catch (e) {
+        console.error('Erro ao guardar foto na ponte:', e.message);
+        return { erro: 'Não foi possível guardar a foto agora. Tente de novo em instantes.' };
+    }
+}
+
+//  Lê TODAS as fotos de um código (índice + conteúdo de cada uma).
+//  Devolve null se o código não existe/expirou.
+async function lerFotosPonte(codigo) {
+    const indice = await lerIndicePonte(codigo);
+    if (indice === null) return null;
+    const fotos = [];
+    for (const m of indice) {
+        try {
+            const data = await redis.get('foto:' + codigo + ':' + m.id);
+            if (data) fotos.push({ id: m.id, mimeType: m.mimeType, quando: m.quando, data });
+        } catch (e) { /* foto individual expirada: segue para as demais */ }
+    }
+    return fotos;
+}
+
+//  Apaga fotos de um código: ids específicos, ou TODAS (se ids vier vazio).
+async function apagarFotosPonte(codigo, ids) {
+    if (!redis) return;
+    try {
+        const indice = await lerIndicePonte(codigo);
+        if (indice === null) return;
+        const apagarTodas = !ids || ids.length === 0;
+        const remover = apagarTodas ? indice.map(m => m.id) : ids;
+        for (const id of remover) {
+            await redis.del('foto:' + codigo + ':' + id);
+        }
+        const restantes = apagarTodas ? [] : indice.filter(m => !remover.includes(m.id));
+        if (restantes.length === 0) {
+            await redis.del('fotos:' + codigo);
+        } else {
+            await redis.set('fotos:' + codigo, JSON.stringify(restantes), 'EX', TEMPO_FOTO);
+        }
+    } catch (e) {
+        console.error('Erro ao apagar fotos da ponte:', e.message);
+    }
+}
+
 // Trava simples anti-abuso (pedidos por minuto por IP).
 // Continua em memória local: pode ser volátil sem problema.
 const contadorPedidos = new NodeCache({ stdTTL: 60, checkperiod: 30 });
@@ -152,6 +296,7 @@ function limitarAbuso(req, res, next) {
     contadorPedidos.set(quem, atual + 1);
     next();
 }
+
 
 // ----------------------------------------------------------------------------
 //  FUNÇÕES AUXILIARES
@@ -174,14 +319,23 @@ function formatarFarmacia(lista) {
 // Procura a diluição de um medicamento na tabela de referência (Barreiro).
 // Compara pelo princípio ativo (primeira palavra). Retorna o objeto ou null.
 // NUNCA inventa: se não achar, devolve null e o sistema avisa pra conferir.
+//  CORRIGIDO (10/jun): antes casava por "contém" (substring), o que podia
+//  associar a diluição de um fármaco PARECIDO ao fármaco errado — e diluição
+//  errada com cara de oficial é pior que diluição ausente. Agora o princípio
+//  ativo só casa como PALAVRA INTEIRA dentro da linha prescrita (mesmo padrão
+//  já usado na conferência farmacológica).
 function buscarDiluicao(nomeMedicamento) {
     const alvo = semAcento(nomeMedicamento);
-    // tenta achar um item cujo princípio ativo apareça no nome prescrito
     let melhor = null;
     diluicoesBarreiro.forEach(item => {
-        const pa = semAcento(item.principio);
-        if (pa.length > 3 && alvo.includes(pa)) {
-            // se houver vários, prefere o de nome mais parecido (mais longo em comum)
+        const pa = semAcento(item.principio).trim();
+        if (pa.length <= 3) return;
+        // Palavra inteira: o princípio precisa estar cercado por início/fim de
+        // linha ou por caracteres que não sejam letras (espaço, número, vírgula).
+        const paEscapado = pa.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const regex = new RegExp('(^|[^a-z])' + paEscapado + '($|[^a-z])');
+        if (regex.test(alvo)) {
+            // se houver vários, prefere o de nome mais longo (mais específico)
             if (!melhor || pa.length > semAcento(melhor.principio).length) {
                 melhor = item;
             }
@@ -327,7 +481,9 @@ function extrairJson(txt) {
 // ----------------------------------------------------------------------------
 
 //  Chama o Gemini. 'modeloId' = 'flash' ou 'pro'. 'usarBusca' liga a busca web.
-async function chamarGemini(promptFinal, modeloId, usarBusca) {
+//  'imagens' (opcional) = fotos de documentos anexadas pela tela; o Gemini lê
+//  imagens nativamente (vão como "inlineData" junto do texto do prompt).
+async function chamarGemini(promptFinal, modeloId, usarBusca, imagens) {
     const modelToUse = modeloId === 'flash' ? MODELO_RAPIDO : MODELO_PROFUNDO;
     const configModelo = { model: modelToUse };
     if (usarBusca) {
@@ -338,8 +494,12 @@ async function chamarGemini(promptFinal, modeloId, usarBusca) {
     if (!usarBusca) {
         generationConfig.responseMimeType = 'application/json';
     }
+    const parts = [{ text: promptFinal }];
+    (imagens || []).forEach(img => {
+        parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
+    });
     const result = await model.generateContent({
-        contents: [{ role: 'user', parts: [{ text: promptFinal }] }],
+        contents: [{ role: 'user', parts }],
         generationConfig
     });
     return result.response.text();
@@ -357,9 +517,19 @@ function ehFalhaTemporariaGemini(error) {
 //  fetch que o Node moderno já tem. Devolve o texto da resposta.
 //  OBS: a busca em fontes (googleSearch) é específica do Gemini; quando o Claude
 //  é usado, ela não se aplica — pedimos só o JSON com o conhecimento do modelo.
-async function chamarClaude(promptFinal) {
+//  'imagens' (opcional) = fotos de documentos; o Claude também lê imagens
+//  nativamente (vão como blocos "image" antes do texto do prompt).
+async function chamarClaude(promptFinal, imagens) {
     if (!process.env.ANTHROPIC_API_KEY) {
         throw new Error('ANTHROPIC_API_KEY não configurada no Render.');
+    }
+    let conteudo = promptFinal;
+    if (imagens && imagens.length > 0) {
+        conteudo = imagens.map(img => ({
+            type: 'image',
+            source: { type: 'base64', media_type: img.mimeType, data: img.data }
+        }));
+        conteudo.push({ type: 'text', text: promptFinal });
     }
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
@@ -375,7 +545,7 @@ async function chamarClaude(promptFinal) {
             system: 'Você responde EXCLUSIVAMENTE com um objeto JSON válido, '
                 + 'sem nenhum texto antes ou depois, sem cercas de código (```), '
                 + 'seguindo exatamente o formato e as chaves pedidos no prompt.',
-            messages: [{ role: 'user', content: promptFinal }]
+            messages: [{ role: 'user', content: conteudo }]
         })
     });
     if (!resp.ok) {
@@ -396,20 +566,20 @@ async function chamarClaude(promptFinal) {
 //   - modeloId 'claude'        -> chama o Claude direto.
 //   - modeloId 'flash' / 'pro' -> chama o Gemini; se ele cair por sobrecarga,
 //                                 tenta o Claude automaticamente.
-async function gerarComFallback(promptFinal, modeloId, usarBusca) {
+async function gerarComFallback(promptFinal, modeloId, usarBusca, imagens) {
     if (modeloId === 'claude') {
-        const txt = await chamarClaude(promptFinal);
+        const txt = await chamarClaude(promptFinal, imagens);
         return { dados: extrairJson(txt), motorUsado: 'claude', caiuParaClaude: false };
     }
     try {
-        const txt = await chamarGemini(promptFinal, modeloId, usarBusca);
+        const txt = await chamarGemini(promptFinal, modeloId, usarBusca, imagens);
         return { dados: extrairJson(txt), motorUsado: 'gemini', caiuParaClaude: false };
     } catch (error) {
         // Só cai pro Claude se: (a) for falha temporária do Gemini E (b) houver
         // chave da Anthropic configurada. Senão, repassa o erro original.
         if (ehFalhaTemporariaGemini(error) && process.env.ANTHROPIC_API_KEY) {
             console.error('Gemini falhou (sobrecarga); tentando Claude. Detalhe:', error.message);
-            const txt = await chamarClaude(promptFinal);
+            const txt = await chamarClaude(promptFinal, imagens);
             return { dados: extrairJson(txt), motorUsado: 'claude', caiuParaClaude: true };
         }
         throw error;
@@ -421,10 +591,23 @@ async function gerarComFallback(promptFinal, modeloId, usarBusca) {
 // ----------------------------------------------------------------------------
 app.post('/api/atendimento', limitarAbuso, async (req, res) => {
     try {
-        const { beId, mensagem, unidade, opcoes, modeloId, sexo, idade, tipoDocumento } = req.body;
+        const { beId, mensagem, unidade, opcoes, modeloId, sexo, idade, tipoDocumento, imagens } = req.body;
 
         if (!beId || !mensagem) {
             return res.status(400).json({ erro: 'Número do BE e relato são obrigatórios.' });
+        }
+
+        // FOTOS DE DOCUMENTOS anexadas pela tela (exames, prontuários antigos,
+        // evoluções). Validação: só imagens, no máximo 9, cada uma até ~1 MB
+        // (a tela já comprime antes de enviar). As fotos NUNCA são gravadas no
+        // histórico — só o texto gerado a partir delas.
+        let fotos = Array.isArray(imagens) ? imagens : [];
+        fotos = fotos
+            .filter(f => f && typeof f.data === 'string' && f.data.length > 0)
+            .filter(f => TIPOS_IMAGEM.includes(f.mimeType))
+            .slice(0, MAX_FOTOS_POR_CODIGO);
+        if (fotos.some(f => f.data.length > TAMANHO_MAX_FOTO)) {
+            return res.status(400).json({ erro: 'Uma das fotos ficou grande demais mesmo após a compressão. Fotografe de novo, de mais perto ou por partes.' });
         }
         if (unidade !== 'ACRIZIO' && unidade !== 'BARREIRO') {
             return res.status(400).json({ erro: 'Unidade inválida.' });
@@ -525,6 +708,29 @@ e prossiga com conhecimento geral, sinalizando que não houve fonte confirmada.
 `;
         }
 
+        // Bloco de instruções sobre as FOTOS (só entra no prompt se houver foto).
+        let blocoFotos = '';
+        if (fotos.length > 0) {
+            blocoFotos = `
+DOCUMENTOS EM FOTO (${fotos.length} imagem(ns) anexada(s)):
+- As imagens anexadas são DOCUMENTOS DE REFERÊNCIA fotografados (exames,
+  prontuários antigos, evoluções, receitas).
+- Use o conteúdo delas SOMENTE conforme a instrução do médico na mensagem
+  (ex.: transcrever resultados de exame, aproveitar a história clínica,
+  mesclar com a evolução atual).
+- A foto NUNCA é, por si só, um novo atendimento: o documento a gerar é o que
+  o médico pediu na mensagem, no tipo de atendimento indicado acima.
+- PRIVACIDADE: IGNORE e OMITA qualquer identificador do paciente que apareça
+  na foto (nome, nome da mãe, CPF, endereço, telefone, convênio). Aproveite
+  APENAS os dados clínicos.
+- TRANSCRIÇÃO FIEL: copie números, unidades e valores de exames EXATAMENTE
+  como estão na foto. Se um trecho estiver ilegível, cortado ou borrado,
+  escreva "[ilegível]" no lugar e avise na "discussao". É TERMINANTEMENTE
+  PROIBIDO chutar, estimar ou completar valores que não dá para ler — valor
+  de exame inventado é risco direto ao paciente.
+`;
+        }
+
         // ------------------------------------------------------------------
         //  PROMPT — agora pedindo o prontuário JÁ SEPARADO nos campos do SIGRAH.
         // ------------------------------------------------------------------
@@ -560,7 +766,7 @@ REGRA ABSOLUTA DE FIDELIDADE AO RELATO:
   um dado não foi informado, registre como "não informado" ou deixe em branco.
 
 ${contextoFarmacologico}
-${blocoFontes}
+${blocoFontes}${blocoFotos}
 REGRAS DE SAÍDA (responda em JSON puro com EXATAMENTE estas chaves):
 {
   "discussao": "",
@@ -803,8 +1009,8 @@ ${mensagem}`;
             try {
                 // Gera as duas em paralelo para não somar os tempos de espera.
                 [textoGemini, textoClaude] = await Promise.all([
-                    chamarGemini(promptFinal, 'pro', usarBusca),
-                    chamarClaude(promptFinal)
+                    chamarGemini(promptFinal, 'pro', usarBusca, fotos),
+                    chamarClaude(promptFinal, fotos)
                 ]);
             } catch (e) {
                 console.error('Erro na geração comparativa:', e.message);
@@ -863,7 +1069,7 @@ ${JSON.stringify(dadosClaude)}`;
         // ==============================================================
         let saida;
         try {
-            saida = await gerarComFallback(promptFinal, modeloId, usarBusca);
+            saida = await gerarComFallback(promptFinal, modeloId, usarBusca, fotos);
         } catch (error) {
             console.error('Erro ao gerar com a IA:', error.message);
             return res.status(502).json({ erro: 'A IA está indisponível no momento. Tente novamente em instantes ou troque o modelo (Flash / Pro / Claude).' });
@@ -880,11 +1086,14 @@ ${JSON.stringify(dadosClaude)}`;
         dados._caiuParaClaude = saida.caiuParaClaude;
 
         // Salva no histórico (guarda também sexo/idade/tipo p/ reabrir o caso).
+        // IMPORTANTE: as fotos em si NÃO entram aqui — só a CONTAGEM, para
+        // registro. O conteúdo clínico extraído já está dentro de "resposta".
         const quando = Date.now();
         historicoPaciente.push({
             medico: mensagem, comandos: op, resposta: dados,
             sexo: sexo || '', idade: (idade !== undefined ? idade : ''),
             tipo: ehEvolucao ? 'evolucao' : 'prontuario',
+            fotos: fotos.length,
             quando: quando
         });
         const salvou = await salvarHistorico(beId, historicoPaciente, sexo, idade, quando);
@@ -1013,7 +1222,69 @@ app.get('/api/recentes', async (req, res) => {
     }
 });
 
-app.get('/', (req, res) => res.send('Servidor do Prontuário Rápido (v3) no ar.'));
+// ----------------------------------------------------------------------------
+//  ROTAS DA PONTE DE FOTOS (celular -> computador, POR CÓDIGO DE 4 NÚMEROS)
+// ----------------------------------------------------------------------------
+//  Fluxo: o celular manda as fotos num pedido só e recebe um CÓDIGO de 4
+//  números (uso ÚNICO, vale 30 min); o outro aparelho digita o código e
+//  recebe as fotos, que são APAGADAS do servidor na entrega. Internamente,
+//  cada foto fica num registro próprio no Redis (o plano gratuito do Upstash
+//  limita ~1 MB por gravação) e um índice leve amarra tudo ao código.
+
+//  1) Recebe as fotos (1 a 9) e devolve o código gerado.
+app.post('/api/ponte', limitarAbuso, async (req, res) => {
+    try {
+        const { fotos } = req.body || {};
+        if (!Array.isArray(fotos) || fotos.length === 0) {
+            return res.status(400).json({ erro: 'Nenhuma foto recebida.' });
+        }
+        if (fotos.length > MAX_FOTOS_POR_CODIGO) {
+            return res.status(400).json({ erro: 'No máximo ' + MAX_FOTOS_POR_CODIGO + ' fotos por código.' });
+        }
+        for (const f of fotos) {
+            if (!f || !TIPOS_IMAGEM.includes(f.mimeType)) {
+                return res.status(400).json({ erro: 'Formato não aceito. Envie as fotos em JPEG ou PNG.' });
+            }
+            if (typeof f.data !== 'string' || f.data.length === 0 || f.data.length > TAMANHO_MAX_FOTO_PONTE) {
+                return res.status(400).json({ erro: 'Uma das fotos ficou grande demais mesmo após a compressão. Fotografe de novo, de mais perto ou por partes.' });
+            }
+        }
+        if (!redis) {
+            return res.status(503).json({ erro: 'A ponte de fotos usa o banco de histórico (Redis), que está indisponível agora. Você ainda pode anexar as fotos direto no aparelho em que for gerar o documento.' });
+        }
+        const codigo = await gerarCodigoPonte();
+        if (!codigo) {
+            return res.status(503).json({ erro: 'Não consegui gerar um código agora. Tente de novo em instantes.' });
+        }
+        // Guarda cada foto num registro próprio (limite de 1 MB por gravação).
+        for (const f of fotos) {
+            const r = await guardarFotoPonte(codigo, f.mimeType, f.data);
+            if (r.erro) {
+                // Falhou no meio: limpa o que já foi e devolve o erro.
+                await apagarFotosPonte(codigo);
+                return res.status(503).json({ erro: r.erro });
+            }
+        }
+        res.json({ ok: true, codigo, fotos: fotos.length });
+    } catch (e) {
+        console.error('Erro ao receber fotos da ponte:', e);
+        res.status(500).json({ erro: 'Falha ao receber as fotos.' });
+    }
+});
+
+//  2) Entrega as fotos de um código e as APAGA (código de uso único).
+app.get('/api/ponte/:codigo', async (req, res) => {
+    const codigo = String(req.params.codigo || '');
+    const fotos = await lerFotosPonte(codigo);
+    if (fotos === null) {
+        return res.status(404).json({ erro: 'Código inválido ou expirado (vale 30 minutos e funciona uma única vez). Gere um novo código no outro aparelho.' });
+    }
+    // Uso único: apaga na entrega (em segundo plano, sem atrasar a resposta).
+    apagarFotosPonte(codigo).catch(() => {});
+    res.json({ fotos });
+});
+
+app.get('/', (req, res) => res.send('Servidor do Prontuário Rápido (v4) no ar.'));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log('Servidor rodando na porta ' + PORT));
