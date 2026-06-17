@@ -1,5 +1,45 @@
 // ============================================================================
-//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v4
+//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v5
+//
+//  Novidades da v5 (17/jun/2026) — seis ajustes de qualidade dos documentos:
+//   1) RECEITA DOMICILIAR: passa a terminar SEMPRE com um bloco curto de
+//      ORIENTAÇÕES NÃO MEDICAMENTOSAS (3 a 4 itens no máximo).
+//   2) CONDUTAS mais enxutas: as medicações feitas NA UNIDADE são agrupadas
+//      em UMA ÚNICA linha (em vez de uma linha por fármaco), reduzindo o
+//      tamanho do texto.
+//   3) TEMPO VERBAL no prontuário: usar "administrar/fazer/realizar"
+//      (o prontuário é redigido ANTES de a conduta ser executada), NUNCA
+//      "administrado/feito/realizado". Reforço no prompt + função
+//      preferirInfinitivoConduta no servidor.
+//   4) PRESCRIÇÃO INTERNA: a quantidade de AMPOLAS/FRASCOS é sempre explícita
+//      (ex.: "1 ampola (2 mL)"), nunca só o volume.
+//   5) RECEITA sem dose flexível: posologia fechada ("tomar 1" OU "tomar 2"),
+//      nunca "tomar 1 a 2 comprimidos" — a decisão é do médico, não do
+//      paciente. Reforço no prompt + função fecharDoseFlexivel no servidor.
+//   6) SINAIS VITAIS no ACRÍZIO: a TELA passa a exibi-los como PRIMEIRA LINHA
+//      do exame físico (sem quadro/título separado). No Barreiro continua em
+//      quadro próprio. (mudança só no index.html)
+//   7) HISTÓRICO ENXUTO NO PROMPT: o que é COLADO no prompt da IA passa a ser
+//      admissão completa + 2 últimas etapas completas + resumo de 1 linha das
+//      etapas do meio. O Redis CONTINUA guardando a pilha inteira (intacta) —
+//      muda só o que é enviado ao modelo (mais rápido, menos repetição de dado
+//      antigo). Degrada para "pilha completa" em qualquer erro.
+//   8) BLOCO MANCHESTER mais enxuto: removido o exemplo concreto de 6 linhas;
+//      o formato segue totalmente especificado por rótulos. A INSTRUÇÃO de
+//      avaliar todo paciente, a regra "só alerte se for red flag real" e o
+//      marcador [[VERMELHO]] permanecem INALTERADOS.
+//   9) DISCUSSÃO MAIS PROFUNDA (Movimentos 2 e 3): a instrução do campo
+//      "discussao" foi reescrita para puxar RACIOCÍNIO (diferenciais com o que
+//      favorece/afasta, can't-miss, "e-se" que muda conduta, justificativa
+//      terapêutica), com PROFUNDIDADE PROPORCIONAL AO CASO — breve no trivial,
+//      densa quando há red flag/dúvida. Não mexe em formatação.
+//  10) FORMATAÇÃO ESTRUTURAL NO SERVIDOR (Movimento 1): três limpezas
+//      MECÂNICAS (limparCabecalhoConduta, normalizarSeparadorVitais,
+//      removerCidVazado) garantem no servidor formatos antes só pedidos no
+//      prompt. Isso permitiu ALIVIAR o prompt dessas regras de aparência
+//      (devolvendo atenção ao raciocínio) SEM perder a formatação, que agora é
+//      garantida de forma determinística. Regras que dependem de juízo clínico
+//      continuam no prompt.
 //
 //  Novidades da v4 (10/jun/2026):
 //   - SENHA DE ACESSO: toda rota /api agora exige a senha (variável de
@@ -375,7 +415,183 @@ function preferirInalacao(txt) {
         .replace(/nebulizad[ao]s?/gi, (m) => (m[0] === m[0].toUpperCase() ? 'Inalado' : 'inalado'));
 }
 
-// REDE DE SEGURANÇA (LEMBRETE GROSSEIRO, não confiável): tenta sinalizar
+// TEMPO VERBAL DA CONDUTA: o prontuário é redigido ANTES de a conduta ser
+// executada (sai junto com a prescrição interna, para só DEPOIS ser realizada).
+// Por isso a conduta deve usar o INFINITIVO ("administrar", "fazer", "realizar")
+// e NUNCA o particípio ("administrado", "feito", "realizado"), que daria a
+// entender que a ação já ocorreu antes do registro. A IA às vezes escorrega
+// para o particípio; esta função troca à força os verbos mais comuns na saída.
+// Cinto e suspensório, além da instrução no prompt.
+//
+// CUIDADO: troca SÓ formas de conduta/ação. NÃO mexe em termos clínicos do
+// exame ("orientado", "hidratado", "corado" etc.) nem em "medicado/sedado"
+// — só nos verbos de execução de conduta listados abaixo.
+function preferirInfinitivoConduta(txt) {
+    if (!txt || typeof txt !== 'string') return txt;
+    // pares: particípio (regex) -> infinitivo. Preserva maiúscula inicial.
+    const trocas = [
+        [/\badministrad[ao]s?\b/gi, 'administrar'],
+        [/\brealizad[ao]s?\b/gi, 'realizar'],
+        [/\bprescrit[ao]s?\b/gi, 'prescrever'],
+        [/\bsolicitad[ao]s?\b/gi, 'solicitar'],
+        [/\bencaminhad[ao]s?\b/gi, 'encaminhar'],
+        [/\biniciad[ao]s?\b/gi, 'iniciar'],
+        [/\baplicad[ao]s?\b/gi, 'aplicar'],
+        [/\bpuncionad[ao]s?\b/gi, 'puncionar'],
+        [/\bmonitorizad[ao]s?\b/gi, 'monitorizar'],
+        [/\bfeit[ao]s?\b/gi, 'fazer'],
+    ];
+    let saida = txt;
+    trocas.forEach(([re, inf]) => {
+        saida = saida.replace(re, (m) => {
+            // Mantém a primeira letra maiúscula se a original começava maiúscula.
+            return (m[0] === m[0].toUpperCase())
+                ? inf.charAt(0).toUpperCase() + inf.slice(1)
+                : inf;
+        });
+    });
+    return saida;
+}
+
+// RECEITA SEM DOSE FLEXÍVEL: uma receita correta não delega a decisão da dose
+// ao paciente. "Tomar 1 a 2 comprimidos" ou "1-2 comprimidos" deve virar uma
+// dose fechada. Como o servidor não tem critério clínico para escolher entre 1
+// e 2, ele fecha pela MENOR dose (a mais segura) e o médico ajusta se quiser.
+// Cobre os padrões mais comuns: "1 a 2", "1-2", "1 ou 2" seguidos de unidade.
+function fecharDoseFlexivel(txt) {
+    if (!txt || typeof txt !== 'string') return txt;
+    const unidade = '(comprimidos?|comp\\.?|cp|c[áa]psulas?|gotas?|jatos?|borrifadas?|m[ée]didas?|colheres?(?:\\s+(?:de\\s+)?(?:ch[áa]|sopa))?|ml|mL)';
+    // Após fechar a faixa, se o número virou "1", coloca a unidade no singular
+    // (ex.: "1 comprimidos" -> "1 comprimido"). Não mexe em ml/mL (invariável).
+    const singularizar = (num, uni) => {
+        if (String(num) === '1') {
+            const u = uni
+                .replace(/colheres/i, 'colher')
+                .replace(/s$/i, '');
+            return num + ' ' + u;
+        }
+        return num + ' ' + uni;
+    };
+    // "1 a 2 comprimidos" / "1 à 2 comprimidos"
+    let saida = txt.replace(
+        new RegExp('(\\d+)\\s*[aà]\\s*\\d+\\s+(' + unidade + ')', 'gi'),
+        (_m, num, uni) => singularizar(num, uni)
+    );
+    // "1-2 comprimidos" / "1–2"
+    saida = saida.replace(
+        new RegExp('(\\d+)\\s*[-–]\\s*\\d+\\s+(' + unidade + ')', 'gi'),
+        (_m, num, uni) => singularizar(num, uni)
+    );
+    // "1 ou 2 comprimidos"
+    saida = saida.replace(
+        new RegExp('(\\d+)\\s+ou\\s+\\d+\\s+(' + unidade + ')', 'gi'),
+        (_m, num, uni) => singularizar(num, uni)
+    );
+    return saida;
+}
+
+// ============================================================================
+//  MOVIMENTO 1 — FORMATAÇÃO ESTRUTURAL GARANTIDA PELO SERVIDOR
+// ----------------------------------------------------------------------------
+//  Estas funções fazem só transformações MECÂNICAS de texto (sem qualquer
+//  juízo clínico), garantindo no servidor formatos que antes dependiam de a IA
+//  lembrar. Vantagem: o servidor é determinístico — nunca esquece, nunca fica
+//  "esquisito". Isso permite ALIVIAR o prompt dessas regras de aparência,
+//  devolvendo atenção do modelo ao raciocínio da discussão. NÃO entram aqui
+//  regras que dependam de ENTENDER o conteúdo (ex.: quais ações agrupar) —
+//  essas continuam no prompt, porque regex não tem critério clínico.
+// ============================================================================
+
+// Remove um cabeçalho redundante ("CD:", "CONDUTA:", "CONDUTAS:") no INÍCIO da
+// conduta. O formato consagrado começa direto nos itens com hífen. Só mexe se o
+// cabeçalho estiver logo no começo, seguido (ou não) de quebra de linha.
+function limparCabecalhoConduta(txt) {
+    if (!txt || typeof txt !== 'string') return txt;
+    return txt.replace(/^\s*(cd|condutas?)\s*:?\s*\n?/i, '').replace(/^\s+/, '');
+}
+
+// Normaliza o separador dos sinais vitais para " | " consistente. A IA às vezes
+// usa "/" ou ";" entre os itens. NÃO inventa nem remove valores — só padroniza
+// o separador ENTRE itens já existentes. MUITO conservador: só troca ";" e "/"
+// cercados por espaço (separadores inequívocos entre itens). NÃO mexe em hífen
+// (ambíguo: "PA: 130-80"), nem em "/" colado (12/12h), nem em vírgula (decimal).
+function normalizarSeparadorVitais(txt) {
+    if (!txt || typeof txt !== 'string') return txt;
+    let s = txt.trim();
+    s = s.replace(/\s+[;/]\s+/g, ' | ');          // " ; " ou " / " entre itens
+    s = s.replace(/\s*\|\s*/g, ' | ');             // padroniza espaçamento da barra
+    s = s.replace(/(?: \| ){2,}/g, ' | ');         // colapsa barras repetidas
+    return s.trim();
+}
+
+// Se um "CID: ..." vazou para dentro da conduta ou do exame físico (campos que
+// NÃO devem conter o CID, pois ele tem campo próprio), remove essa linha.
+// Conservador: só remove a LINHA que começa com "CID:" — não toca no resto.
+function removerCidVazado(txt) {
+    if (!txt || typeof txt !== 'string') return txt;
+    return txt
+        .split('\n')
+        .filter(l => !/^\s*cid\s*:/i.test(l))
+        .join('\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+}
+// O Redis continua guardando a pilha INTEIRA, intacta. Esta função só decide
+// O QUE da pilha é colado no prompt da IA, para: (1) deixar o prompt menor e
+// mais rápido; (2) reduzir o risco de a IA repetir dado antigo no documento
+// novo. NÃO descarta informação do banco — só do texto enviado ao modelo.
+//
+// DESENHO SEGURO (o ponto crítico é não perder contexto clínico que decide
+// conduta):
+//   - A ADMISSÃO (primeira etapa) vai SEMPRE COMPLETA — é a âncora do caso
+//     (alergias, comorbidades, exame inicial). Nunca é resumida.
+//   - As 2 ÚLTIMAS etapas vão COMPLETAS — são as que importam para reavaliar
+//     agora.
+//   - As etapas do MEIO (entre a admissão e as 2 últimas) viram um RESUMO de
+//     uma linha cada (data, tipo, e a conduta daquela etapa), só para registrar
+//     que existiram e o que foi feito — sem o objeto inteiro.
+//   - Se a pilha tem até 3 etapas, não há "meio": manda tudo completo (não vale
+//     arriscar resumo quando o ganho é pequeno).
+//
+// Retorna SEMPRE um array (mesmo formato de antes), pronto para JSON.stringify.
+// Em qualquer dúvida/erro, devolve a pilha original (degradação elegante:
+// o pior caso é o comportamento de hoje, mandar tudo).
+const ULTIMAS_COMPLETAS = 2; // quantas etapas finais vão completas
+function resumirEtapaHistorico(etapa) {
+    try {
+        const r = etapa && etapa.resposta ? etapa.resposta : {};
+        const conduta = (r.prontuario && r.prontuario.conduta) ? r.prontuario.conduta : '';
+        const evol = r.evolucao || '';
+        // Pega um resumo curto: a evolução (se houver) ou a conduta, encurtada.
+        let trecho = (evol || conduta || '').replace(/\s+/g, ' ').trim();
+        if (trecho.length > 240) trecho = trecho.slice(0, 240) + '…';
+        const data = etapa && etapa.quando ? new Date(etapa.quando).toLocaleString('pt-BR') : '';
+        return {
+            _resumo: true,
+            tipo: (etapa && etapa.tipo) ? etapa.tipo : 'prontuario',
+            quando: data,
+            resumo: trecho || '(sem conduta/evolução registrada)'
+        };
+    } catch (e) {
+        return { _resumo: true, resumo: '(etapa anterior — resumo indisponível)' };
+    }
+}
+function prepararHistoricoPrompt(pilha) {
+    try {
+        if (!Array.isArray(pilha)) return [];
+        const n = pilha.length;
+        // Até 3 etapas: manda tudo completo (não há meio que valha resumir).
+        if (n <= ULTIMAS_COMPLETAS + 1) return pilha;
+        const admissao = pilha[0];                       // âncora, completa
+        const ultimas = pilha.slice(n - ULTIMAS_COMPLETAS); // recentes, completas
+        const meio = pilha.slice(1, n - ULTIMAS_COMPLETAS); // resumir
+        const meioResumido = meio.map(resumirEtapaHistorico);
+        return [admissao, ...meioResumido, ...ultimas];
+    } catch (e) {
+        console.error('Falha ao enxugar histórico para o prompt; enviando pilha completa:', e.message);
+        return Array.isArray(pilha) ? pilha : [];
+    }
+}
 // remédios prescritos que talvez não estejam na farmácia da unidade. É um
 // auxiliar de memória, NÃO uma verificação confiável: pode deixar passar item
 // fora da lista (falso negativo) e pode alertar à toa (falso positivo). A
@@ -790,8 +1006,30 @@ REGRAS DE SAÍDA (responda em JSON puro com EXATAMENTE estas chaves):
 
 INSTRUÇÕES DE CADA CAMPO:
 
-1. "discussao": análise de retaguarda concisa. Inclua red flags, raciocínio,
-   diagnósticos "can't miss", e análise da prescrição/interações.
+1. "discussao": este é o campo de RACIOCÍNIO CLÍNICO — o mais importante para o
+   médico, e o ÚNICO onde você pensa em voz alta. Dedique a ele sua melhor
+   análise; os campos do prontuário são só o registro formal, mas é AQUI que
+   você agrega valor. NÃO trate este campo como um resumo nem como uma lista de
+   avisos: trate-o como a opinião de um colega experiente de retaguarda.
+   PROFUNDIDADE PROPORCIONAL AO CASO (regra central): calibre o tamanho e a
+   densidade ao RISCO e à AMBIGUIDADE do quadro.
+   - Caso simples e típico (ex.: IVAS viral, lombalgia mecânica sem red flag):
+     seja BREVE — 2 a 4 linhas. NÃO encha linguiça nem force diferenciais
+     improváveis. Dizer "quadro típico, baixo risco, conduta sintomática
+     adequada" basta quando é verdade.
+   - Caso com red flag, dúvida diagnóstica, dor torácica/abdominal, sintoma
+     neurológico, descompensação, interação medicamentosa ou achado que não
+     fecha: APROFUNDE. Inclua, conforme couber ao caso:
+       • os DIAGNÓSTICOS DIFERENCIAIS plausíveis e, para cada um, o que no caso
+         o FAVORECE ou AFASTA (não só liste — raciocine);
+       • os diagnósticos "CAN'T MISS" daquele quadro e como descartá-los;
+       • o que MUDARIA A CONDUTA se um exame vier alterado (ex.: "se o ECG
+         mostrar supra, isto deixa de ser área verde");
+       • a JUSTIFICATIVA da escolha terapêutica e alternativas, quando relevante;
+       • análise da prescrição: interações, ajuste por idade/função renal, dose.
+   Densidade NÃO é comprimento: prefira frases que decidem conduta a parágrafos
+   genéricos. Evite repetir o que já está no prontuário; aqui é para o que NÃO
+   cabe lá — a dúvida, o porquê, o e-se.
    ESTE é o ÚNICO campo onde você PODE e DEVE expressar INCERTEZAS: marque
    claramente o que é dúvida, o que depende de exame para confirmar/descartar,
    e onde você tem menos confiança (ex: "ATENÇÃO: dose pediátrica — confira",
@@ -819,15 +1057,13 @@ INSTRUÇÕES DE CADA CAMPO:
    um red flag REAL nos dados informados. Se NÃO houver, NÃO escreva nada sobre
    isso (não gaste espaço nem crie alarme). QUANDO houver, escreva no INÍCIO da
    "discussao" um bloco EM CAIXA ALTA começando EXATAMENTE com o marcador
-   "[[VERMELHO]]" (o sistema usa isso para destacar), contendo: (a) o
-   DISCRIMINADOR de Manchester aplicável; (b) os SINAIS OBJETIVOS do próprio
-   paciente que o sustentam (citando os valores/achados do relato); (c) uma
-   JUSTIFICATIVA CLÍNICA curta para a transferência. MODELO:
-   "[[VERMELHO]] POSSÍVEL CASO DE SALA VERMELHA — REAVALIAR CLASSIFICAÇÃO.
-   DISCRIMINADOR (MANCHESTER): DISPNEIA AGUDA / SATURAÇÃO BAIXA.
-   SINAIS NO PACIENTE: SPO2 88% EM AR AMBIENTE, FR 32, USO DE MUSCULATURA ACESSÓRIA.
-   JUSTIFICATIVA: INSUFICIÊNCIA RESPIRATÓRIA EM CURSO; NECESSITA SUPORTE E
-   MONITORIZAÇÃO DE EMERGÊNCIA, INCOMPATÍVEL COM ÁREA VERDE/AMARELA."
+   "[[VERMELHO]]" (o sistema usa isso para destacar), contendo, EM CAIXA ALTA e
+   nesta ordem: (a) o DISCRIMINADOR de Manchester aplicável; (b) os SINAIS
+   OBJETIVOS do próprio paciente que o sustentam (citando os valores/achados do
+   relato); (c) uma JUSTIFICATIVA CLÍNICA curta para a transferência. Comece o
+   bloco por "[[VERMELHO]] POSSÍVEL CASO DE SALA VERMELHA — REAVALIAR
+   CLASSIFICAÇÃO." e use rótulos "DISCRIMINADOR (MANCHESTER):", "SINAIS NO
+   PACIENTE:" e "JUSTIFICATIVA:".
    IMPORTANTE: baseie-se SOMENTE nos dados que o médico informou; você NÃO
    examina o paciente. Encerre o bloco com: "(BASEADO APENAS NO RELATO —
    CONFIRMAR À BEIRA DO LEITO.)"
@@ -864,51 +1100,72 @@ AR: MVF presente bilateralmente, sem RA
 AD: plano, flácido, RHA presentes, indolor à palpação, sem massas ou visceromegalias
 Neurológico: ECG 15, pupilas isocóricas e fotorreagentes, pares cranianos preservados, força e sensibilidade preservadas e simétricas nos 4 membros, sem sinais de irritação meníngea"
      (campo 03 - parte textual)
-   - "sinais_vitais": liste APENAS os sinais que o médico informou, separados por
-     " | ", no formato "RÓTULO: valor". Use os rótulos padrão quando couber:
-     SpO2, FC, FR, PA, Tax (em °C), Peso (em kg). EXEMPLO: se o médico só informou
-     pressão e frequência cardíaca, o campo deve conter EXATAMENTE algo como
-     "PA: 130x80 mmHg | FC: 92 bpm" — e NADA MAIS. REGRA CRÍTICA: NÃO inclua
-     rótulos de itens não informados (nada de "FR:", "SpO2:" ou "Tax: °C" vazios).
-     Se NENHUM sinal vital foi informado, deixe este campo TOTALMENTE VAZIO ("").
-     É TERMINANTEMENTE PROIBIDO inventar, estimar ou presumir valores "normais".
+   - "sinais_vitais": liste APENAS os sinais que o médico informou, no formato
+     "RÓTULO: valor" separados por " | ". Rótulos padrão: SpO2, FC, FR, PA,
+     Tax (°C), Peso (kg). REGRA CRÍTICA DE SEGURANÇA: NÃO inclua rótulos de
+     itens não informados (nada de "FR:" ou "Tax: °C" vazios) e, se NENHUM sinal
+     vital foi informado, deixe o campo TOTALMENTE VAZIO (""). É TERMINANTEMENTE
+     PROIBIDO inventar, estimar ou presumir valores "normais".
      (vai num quadro separado, NÃO copiado junto)
    - "hipotese_diagnostica": a(s) hipótese(s) em texto. (campo 04)
    - "conduta": condutas e orientações. SEJA CONCISO — nada de "encher
-     linguiça". FORMATO OBRIGATÓRIO: NÃO escreva nenhum cabeçalho como "CD:" ou
-     "CONDUTA" — comece DIRETO pelos ITENS COM HÍFEN, um por linha (quebra real
+     linguiça". Comece direto pelos ITENS COM HÍFEN, um por linha (quebra real
      \\n). Mire em 3 a 5 itens curtos e objetivos; agrupe ações relacionadas no
      mesmo item.
-     REGRA OBRIGATÓRIA: sempre que houver medicação, CITE-A NOMINALMENTE com
-     dose, via e frequência — tanto a feita na UPA quanto a da receita
-     domiciliar (não escreva apenas "medicação sintomática" ou "receita
-     entregue" sem nomear os fármacos). MODELO:
-     "- Sintomático na UPA: Tenoxicam 20 mg IM + Dipirona 1 g (2 mL) EV, agora.
-- Reavaliação após o efeito; se melhora, alta com sinais de alerta (piora súbita, febre, déficit).
+     TEMPO VERBAL OBRIGATÓRIO: use SEMPRE o INFINITIVO da ação ("administrar",
+     "fazer", "realizar", "prescrever", "encaminhar", "solicitar", "iniciar").
+     NUNCA use o particípio ("administrado", "feito", "realizado", "prescrito"),
+     pois o prontuário é redigido ANTES de a conduta ser executada — escrever no
+     particípio daria a entender, falsamente, que a ação já ocorreu. EXCEÇÃO:
+     se o próprio relato do médico disser que algo JÁ foi feito, aí sim relate no
+     passado SÓ aquilo.
+     AGRUPAR MEDICAÇÃO DA UNIDADE EM UMA LINHA: todas as medicações feitas NA UPA
+     devem caber em UM ÚNICO item (uma linha), separadas por " + ", em vez de uma
+     linha para cada fármaco — isso encurta a conduta. CITE-AS NOMINALMENTE com
+     dose, via e frequência (tanto as da UPA quanto as da receita domiciliar; não
+     escreva apenas "medicação sintomática" ou "receita entregue" sem nomear).
+     MODELO:
+     "- Administrar na UPA: Tenoxicam 20 mg IM + Dipirona 1 g (2 mL) EV, agora.
+- Reavaliar após o efeito; se melhora, alta com sinais de alerta (piora súbita, febre, déficit).
 - Receita domiciliar: Naproxeno 500 mg 12/12h por 5 dias e Metoclopramida 10 mg se náusea.
-- Encaminhamento para acompanhamento na APS."
+- Encaminhar para acompanhamento na APS."
      (campo 06)
 
 4. "prescricao_interna": medicações usadas NA UPA. APENAS itens da lista desta
    unidade. Respeite a via indicada. FORMATO OBRIGATÓRIO: itens ENUMERADOS
    (1., 2., 3.), UM POR LINHA (quebra real \\n), cada um com dose, via e
-   frequência. Para injetáveis, escreva claramente "ampola/frasco" e a via
-   (EV/IM) para o sistema localizar a diluição. MODELO:
-   "1. Dipirona 1 g (2 mL) EV agora.
-2. Tenoxicam 20 mg IM agora.
-3. SF 0,9% 500 mL EV se necessário."
+   frequência. PARA INJETÁVEIS É OBRIGATÓRIO EXPLICITAR A QUANTIDADE DE AMPOLAS
+   OU FRASCOS a administrar (ex.: "1 ampola", "2 ampolas", "1 frasco") — NUNCA
+   informe só o volume/dose sem a quantidade de ampolas/frascos. Escreva também
+   a via (EV/IM) para o sistema localizar a diluição. MODELO:
+   "1. Dipirona 1 g — 1 ampola (2 mL) EV agora.
+2. Tenoxicam 20 mg — 1 ampola IM agora.
+3. SF 0,9% 500 mL — 1 frasco EV se necessário."
 
 5. "receita": receita de uso DOMICILIAR, agrupada por via (USO ORAL, USO
    TÓPICO, USO INALATÓRIO...). FORMATO CONSAGRADO OBRIGATÓRIO para CADA item:
    primeiro o nome + concentração, depois a QUANTIDADE TOTAL a dispensar
    (nº de comprimidos, caixa(s), frasco(s), tubo(s)), e SÓ ENTÃO a posologia
-   na linha de baixo. NUNCA pule a quantidade total. MODELO:
+   na linha de baixo. NUNCA pule a quantidade total.
+   DOSE FECHADA OBRIGATÓRIA: a posologia NÃO pode delegar a decisão ao paciente.
+   É PROIBIDO escrever faixas como "tomar 1 a 2 comprimidos" ou "1-2 comprimidos"
+   — defina UMA dose única ("tomar 1 comprimido" OU "tomar 2 comprimidos").
+   AO FINAL DA RECEITA, acrescente SEMPRE um bloco curto de ORIENTAÇÕES NÃO
+   MEDICAMENTOSAS, com no MÁXIMO 3 a 4 itens objetivos e pertinentes ao quadro
+   (ex.: hidratação, repouso, sinais de alerta para retornar, cuidados locais,
+   dieta). Encabece esse bloco com a linha "ORIENTAÇÕES:" e use itens com hífen.
+   MODELO:
    "USO ORAL
 1. Naproxeno 500 mg ............................. 10 comprimidos
    Tomar 1 comprimido de 12/12 horas por 5 dias.
 
 2. Metoclopramida 10 mg ......................... 1 caixa
-   Tomar 1 comprimido até 3x ao dia se náusea."
+   Tomar 1 comprimido até 3x ao dia se náusea.
+
+ORIENTAÇÕES:
+- Repouso relativo e hidratação oral abundante.
+- Retornar se febre persistente, piora da dor ou novos sintomas.
+- Evitar esforço físico intenso até reavaliação."
    Respeite LITERALMENTE o que o médico pediu/proibiu/trocou no relato. Sem
    textos burocráticos sobre falta de medicação.
 
@@ -931,7 +1188,7 @@ DIRETRIZ DA AÇÃO:
 ${instrucoesAcao}
 
 HISTÓRICO DO PACIENTE (mesmo BE):
-${JSON.stringify(historicoPaciente)}
+${JSON.stringify(prepararHistoricoPrompt(historicoPaciente))}
 
 MENSAGEM DO MÉDICO:
 ${mensagem}`;
@@ -953,6 +1210,24 @@ ${mensagem}`;
             if (dados.prontuario) {
                 dados.prontuario.conduta = preferirInalacao(dados.prontuario.conduta);
                 dados.prontuario.exame_fisico_texto = preferirInalacao(dados.prontuario.exame_fisico_texto);
+            }
+
+            // --- Tempo verbal: infinitivo na conduta (prontuário é redigido
+            //     ANTES de executar a conduta) ---
+            if (dados.prontuario) {
+                dados.prontuario.conduta = preferirInfinitivoConduta(dados.prontuario.conduta);
+            }
+
+            // --- Receita: fecha doses flexíveis ("1 a 2 comp" -> "1 comp") ---
+            dados.receita = fecharDoseFlexivel(dados.receita);
+
+            // --- Movimento 1: formatação estrutural garantida pelo servidor ---
+            // (transformações mecânicas; não dependem de juízo clínico)
+            if (dados.prontuario) {
+                dados.prontuario.conduta = limparCabecalhoConduta(dados.prontuario.conduta);
+                dados.prontuario.conduta = removerCidVazado(dados.prontuario.conduta);
+                dados.prontuario.exame_fisico_texto = removerCidVazado(dados.prontuario.exame_fisico_texto);
+                dados.prontuario.sinais_vitais = normalizarSeparadorVitais(dados.prontuario.sinais_vitais);
             }
 
             // --- TRAVAS DE SEGURANÇA (servidor manda, não a IA) ---
