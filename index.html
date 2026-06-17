@@ -603,8 +603,25 @@
         const grupo = document.getElementById('grupoProntuario');
         grupo.innerHTML = '';
         if(!pront) return;
+
+        // ACRÍZIO: os sinais vitais NÃO vão num quadro separado — entram como a
+        // PRIMEIRA LINHA do exame físico (o Acrízio usa prontuário corrido, não
+        // o SIGRAH). No BARREIRO, continuam num quadro próprio (campo a digitar
+        // separadamente no sistema). Decidido por unidade aqui na tela, para não
+        // depender de a IA acertar e para não mexer no fluxo do Barreiro.
+        const unidade = document.getElementById('unidade').value;
+        const pView = Object.assign({}, pront);
+        if(unidade === 'ACRIZIO'){
+            const vit = (pView.sinais_vitais || '').trim();
+            const ef  = (pView.exame_fisico_texto || '').trim();
+            if(vit){
+                pView.exame_fisico_texto = ef ? (vit + '\n' + ef) : vit;
+            }
+            pView.sinais_vitais = ''; // não renderiza o quadro separado
+        }
+
         CAMPOS_PRONT.forEach((c,i)=>{
-            const val = pront[c.key];
+            const val = pView[c.key];
             if(!val || !val.trim()) return;
             const idRes = 'pront_'+i;
             const ehVital = c.vital === true;
