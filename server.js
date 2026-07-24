@@ -1,5 +1,27 @@
 // ============================================================================
-//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v5
+//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v6
+//
+//  Novidades da v6 (24/jul/2026) — três ajustes:
+//   1) RECEITA COM FREQUÊNCIA EM HORAS: a posologia domiciliar sai SEMPRE em
+//      intervalo de horas ("de 8/8 horas"), NUNCA "até 3x ao dia" / "4 vezes
+//      ao dia". Corrigido o próprio MODELO do prompt (que ensinava o erro),
+//      criada regra explícita e a função preferirIntervaloHoras no servidor
+//      (2x->12/12h, 3x->8/8h, 4x->6/6h, 6x->4/4h; "1x ao dia" fica; "5x ao
+//      dia" não tem intervalo redondo e não é tocado).
+//   2) DILUIÇÃO INLINE NA PRESCRIÇÃO DO ACRÍZIO: a UPA Acrízio passou a exigir
+//      diluição nas medicações feitas na unidade. Diferente do Barreiro (bloco
+//      separado), no Acrízio a diluição vai NA MESMA LINHA da medicação
+//      (função anexarDiluicaoInline). Usa a MESMA tabela diluicoes.js (nunca
+//      inventa); se o médico já ditou a diluição na linha, o servidor NÃO
+//      anexa por cima; injetável sem diluição na tabela gera o mesmo aviso do
+//      Barreiro na discussão. O Barreiro segue EXATAMENTE como estava.
+//   3) CONDUTA EM PRIMEIRA PESSOA: o tempo verbal da conduta muda do
+//      infinitivo para a primeira pessoa do presente ("faço, prescrevo,
+//      solicito, oriento"). Prompt reescrito + função
+//      preferirPrimeiraPessoaConduta no servidor (substitui a antiga
+//      preferirInfinitivoConduta). A conversão forçada age SÓ no verbo que
+//      ABRE cada item, para não corromper frases no meio da linha
+//      (ex.: "orientação de retornar se piora" fica intacta).
 //
 //  Novidades da v5 (17/jun/2026) — seis ajustes de qualidade dos documentos:
 //   1) RECEITA DOMICILIAR: passa a terminar SEMPRE com um bloco curto de
@@ -80,8 +102,15 @@ app.use(express.json({ limit: '20mb' }));
 //  CONFIGURAÇÕES (tudo num lugar só)
 // ----------------------------------------------------------------------------
 //  Modelos do Gemini (versões estáveis confirmadas jun/2026).
-//  Para subir o Pro no futuro, troque por 'gemini-3.1-pro' quando virar estável.
-const MODELO_RAPIDO = 'gemini-3.5-flash';
+//  FLASH atualizado (24/jul/2026): gemini-3.6-flash (lançado 21/jul/2026) —
+//  mais barato na saída, ~17% menos tokens e melhor em benchmarks que o 3.5.
+//  PRO: mantido no 2.5-pro de propósito. O 3.1 Pro ainda está em "preview" e o
+//  nome exato do modelo não foi confirmado — nome errado = erro em TODA chamada
+//  do botão Pro (e erro de modelo inexistente NÃO aciona o fallback pro Claude,
+//  que só pega sobrecarga 503/429/500). Trocar por 'gemini-3.1-pro' SÓ quando o
+//  Google publicar a versão estável com esse nome. Com a cobrança ativada no
+//  projeto, o 2.5-pro deixou de ter o limite de pedidos do nível gratuito.
+const MODELO_RAPIDO = 'gemini-3.6-flash';
 const MODELO_PROFUNDO = 'gemini-2.5-pro';
 
 //  Modelo do Claude (Anthropic) — usado como ALTERNATIVA ao Gemini.
@@ -415,42 +444,75 @@ function preferirInalacao(txt) {
         .replace(/nebulizad[ao]s?/gi, (m) => (m[0] === m[0].toUpperCase() ? 'Inalado' : 'inalado'));
 }
 
-// TEMPO VERBAL DA CONDUTA: o prontuário é redigido ANTES de a conduta ser
-// executada (sai junto com a prescrição interna, para só DEPOIS ser realizada).
-// Por isso a conduta deve usar o INFINITIVO ("administrar", "fazer", "realizar")
-// e NUNCA o particípio ("administrado", "feito", "realizado"), que daria a
-// entender que a ação já ocorreu antes do registro. A IA às vezes escorrega
-// para o particípio; esta função troca à força os verbos mais comuns na saída.
-// Cinto e suspensório, além da instrução no prompt.
+// TEMPO VERBAL DA CONDUTA — PRIMEIRA PESSOA (v6): a conduta usa o estilo
+// consagrado de nota médica em primeira pessoa do presente ("faço, prescrevo,
+// solicito, oriento"). A IA às vezes escorrega para o infinitivo ("fazer") ou
+// o particípio ("feito"); esta função converte à força o verbo que ABRE cada
+// item da conduta. Cinto e suspensório, além da instrução no prompt.
 //
-// CUIDADO: troca SÓ formas de conduta/ação. NÃO mexe em termos clínicos do
-// exame ("orientado", "hidratado", "corado" etc.) nem em "medicado/sedado"
-// — só nos verbos de execução de conduta listados abaixo.
-function preferirInfinitivoConduta(txt) {
+// CUIDADO (por que só no INÍCIO da linha): converter o verbo em qualquer
+// posição corromperia frases legítimas no meio do item — ex.: "alta com
+// orientação de RETORNAR se piora" (ação do PACIENTE, não do médico) ou
+// "paciente orientado quanto aos riscos". Restringir ao verbo de abertura do
+// item (após "-", "•" ou "1.") pega exatamente onde o verbo de conduta mora,
+// sem efeito colateral. Preserva a maiúscula/minúscula original.
+function preferirPrimeiraPessoaConduta(txt) {
     if (!txt || typeof txt !== 'string') return txt;
-    // pares: particípio (regex) -> infinitivo. Preserva maiúscula inicial.
+    // pares: [infinitivo OU particípio] -> primeira pessoa do presente
     const trocas = [
-        [/\badministrad[ao]s?\b/gi, 'administrar'],
-        [/\brealizad[ao]s?\b/gi, 'realizar'],
-        [/\bprescrit[ao]s?\b/gi, 'prescrever'],
-        [/\bsolicitad[ao]s?\b/gi, 'solicitar'],
-        [/\bencaminhad[ao]s?\b/gi, 'encaminhar'],
-        [/\biniciad[ao]s?\b/gi, 'iniciar'],
-        [/\baplicad[ao]s?\b/gi, 'aplicar'],
-        [/\bpuncionad[ao]s?\b/gi, 'puncionar'],
-        [/\bmonitorizad[ao]s?\b/gi, 'monitorizar'],
-        [/\bfeit[ao]s?\b/gi, 'fazer'],
+        ['administrar|administrad[ao]s?', 'administro'],
+        ['fazer|feit[ao]s?', 'faço'],
+        ['realizar|realizad[ao]s?', 'realizo'],
+        ['prescrever|prescrit[ao]s?', 'prescrevo'],
+        ['solicitar|solicitad[ao]s?', 'solicito'],
+        ['encaminhar|encaminhad[ao]s?', 'encaminho'],
+        ['iniciar|iniciad[ao]s?', 'inicio'],
+        ['aplicar|aplicad[ao]s?', 'aplico'],
+        ['puncionar|puncionad[ao]s?', 'punciono'],
+        ['monitorizar|monitorizad[ao]s?', 'monitorizo'],
+        ['orientar|orientad[ao]s?', 'oriento'],
+        ['reavaliar|reavaliad[ao]s?', 'reavalio'],
+        ['manter|mantid[ao]s?', 'mantenho'],
+        ['suspender|suspens[ao]s?', 'suspendo'],
+        ['associar|associad[ao]s?', 'associo'],
+        ['liberar|liberad[ao]s?', 'libero'],
+        ['avaliar|avaliad[ao]s?', 'avalio'],
+        ['coletar|coletad[ao]s?', 'coleto'],
+        ['transferir|transferid[ao]s?', 'transfiro'],
     ];
-    let saida = txt;
-    trocas.forEach(([re, inf]) => {
-        saida = saida.replace(re, (m) => {
-            // Mantém a primeira letra maiúscula se a original começava maiúscula.
-            return (m[0] === m[0].toUpperCase())
-                ? inf.charAt(0).toUpperCase() + inf.slice(1)
-                : inf;
-        });
-    });
-    return saida;
+    return txt.split('\n').map(linha => {
+        for (const [padrao, pp] of trocas) {
+            // O verbo precisa ABRIR o item: início da linha, opcionalmente
+            // precedido de marcador ("-", "•", "*", "1.", "2)").
+            const re = new RegExp('^(\\s*(?:[-•*]\\s*|\\d+[.)]\\s*)?)(' + padrao + ')\\b', 'i');
+            const m = linha.match(re);
+            if (m) {
+                const original = m[2];
+                const sub = (original.charAt(0) === original.charAt(0).toUpperCase())
+                    ? pp.charAt(0).toUpperCase() + pp.slice(1)
+                    : pp;
+                return linha.replace(re, (_t, prefixo) => prefixo + sub);
+            }
+        }
+        return linha;
+    }).join('\n');
+}
+
+// FREQUÊNCIA EM HORAS (v6): a posologia deve sair em INTERVALO DE HORAS
+// ("de 8/8 horas"), nunca "até 3x ao dia" / "4 vezes ao dia" — formato que a
+// IA aprendia do próprio exemplo antigo do prompt. Esta função converte à
+// força os casos com intervalo redondo. Cinto e suspensório, além da regra
+// nova no prompt.
+//
+// CUIDADO: só converte 2, 3, 4 e 6 vezes ao dia (12/12h, 8/8h, 6/6h, 4/4h).
+// "1x ao dia" é formato normal e FICA; "5x ao dia" (ex.: aciclovir) não tem
+// intervalo redondo e NÃO é tocado. O texto ao redor (ex.: "se náusea") é
+// preservado. "12 vezes ao dia" não casa (não há fronteira entre 1 e 2).
+function preferirIntervaloHoras(txt) {
+    if (!txt || typeof txt !== 'string') return txt;
+    const mapa = { '2': 'de 12/12 horas', '3': 'de 8/8 horas', '4': 'de 6/6 horas', '6': 'de 4/4 horas' };
+    const re = /(?:at[eé]\s+)?\b([2346])\s*(?:x|vezes)\s*(?:\/\s*|\s+(?:ao|por)\s+)dia\b/gi;
+    return txt.replace(re, (m, n) => mapa[n] || m);
 }
 
 // RECEITA SEM DOSE FLEXÍVEL: uma receita correta não delega a decisão da dose
@@ -670,6 +732,59 @@ function montarDiluicoes(textoPrescricao) {
             'DILUIÇÕES (Referência EBSERH — CONFERIR antes de administrar):\n\n'
             + blocos.join('\n\n');
     }
+    return resultado;
+}
+
+// Versão COMPACTA da diluição para caber NA MESMA LINHA da prescrição
+// (modo Acrízio). Traz só o essencial do preparo: reconstituição, diluição e
+// tempo/velocidade. A via fica de fora (já está na própria linha prescrita);
+// concentração máxima e observações longas ficam de fora por espaço — a
+// referência completa continua na tabela.
+function textoDiluicaoInline(reg) {
+    const partes = [];
+    if (reg.reconstituicao) partes.push(`reconstituir: ${reg.reconstituicao}`);
+    if (reg.diluicao) partes.push(`diluir em: ${reg.diluicao}`);
+    if (reg.tempoInfusao) partes.push(`infusão: ${reg.tempoInfusao}`);
+    return partes.join('; ');
+}
+
+// DILUIÇÃO INLINE (SÓ Acrízio, v6): a UPA Acrízio passou a exigir diluição
+// nas medicações administradas na unidade — e lá o formato pedido é TUDO NA
+// MESMA LINHA (medicação + como fazer + diluição), diferente do Barreiro
+// (bloco separado). Esta função varre a prescrição interna e, em cada linha
+// injetável, anexa a diluição da tabela ao FIM da própria linha.
+// Regras de segurança:
+//   - usa APENAS a tabela diluicoes.js (regra inegociável nº 1: nunca chuta);
+//   - se o MÉDICO já ditou a diluição na linha (contém "dilu"/"reconstitu"),
+//     o servidor NÃO anexa por cima — o que o médico escreveu prevalece;
+//   - injetável SEM diluição na tabela entra em naoEncontrados (vira o mesmo
+//     aviso do Barreiro na discussão).
+function anexarDiluicaoInline(textoPrescricao) {
+    const resultado = { texto: textoPrescricao || '', naoEncontrados: [] };
+    if (!textoPrescricao) return resultado;
+
+    resultado.texto = textoPrescricao.split('\n').map(linha => {
+        const minus = semAcento(linha);
+        const ehInjetavel = /(ampola|frasco|injet|endoven|\bev\b|\bim\b|intramuscular|intravenos)/i.test(minus);
+        if (!pareceMedicacao(linha) || !ehInjetavel) return linha;
+
+        // O médico já ditou a diluição nesta linha? Então respeita e não mexe.
+        if (/dilu|reconstitu/.test(minus)) return linha;
+
+        const reg = buscarDiluicao(linha);
+        if (!reg) {
+            const t = linha.trim();
+            if (t) resultado.naoEncontrados.push(t);
+            return linha;
+        }
+        const info = textoDiluicaoInline(reg);
+        if (!info) return linha;
+        // Tira ponto final/espaços sobrando antes de emendar, para não sair
+        // "agora. — diluir em...".
+        const base = linha.replace(/[\s.]+$/, '');
+        return `${base} — ${info}`;
+    }).join('\n');
+
     return resultado;
 }
 
@@ -1112,23 +1227,22 @@ Neurológico: ECG 15, pupilas isocóricas e fotorreagentes, pares cranianos pres
      linguiça". Comece direto pelos ITENS COM HÍFEN, um por linha (quebra real
      \\n). Mire em 3 a 5 itens curtos e objetivos; agrupe ações relacionadas no
      mesmo item.
-     TEMPO VERBAL OBRIGATÓRIO: use SEMPRE o INFINITIVO da ação ("administrar",
-     "fazer", "realizar", "prescrever", "encaminhar", "solicitar", "iniciar").
-     NUNCA use o particípio ("administrado", "feito", "realizado", "prescrito"),
-     pois o prontuário é redigido ANTES de a conduta ser executada — escrever no
-     particípio daria a entender, falsamente, que a ação já ocorreu. EXCEÇÃO:
-     se o próprio relato do médico disser que algo JÁ foi feito, aí sim relate no
-     passado SÓ aquilo.
+     TEMPO VERBAL OBRIGATÓRIO: use SEMPRE a PRIMEIRA PESSOA DO SINGULAR no
+     presente — "faço", "prescrevo", "solicito", "oriento", "encaminho",
+     "administro", "reavalio", "mantenho". É o estilo consagrado de conduta
+     médica: quem assina fala na própria voz. NUNCA use o infinitivo
+     ("fazer", "prescrever", "solicitar") nem o particípio ("feito",
+     "prescrito", "solicitado").
      AGRUPAR MEDICAÇÃO DA UNIDADE EM UMA LINHA: todas as medicações feitas NA UPA
      devem caber em UM ÚNICO item (uma linha), separadas por " + ", em vez de uma
      linha para cada fármaco — isso encurta a conduta. CITE-AS NOMINALMENTE com
      dose, via e frequência (tanto as da UPA quanto as da receita domiciliar; não
      escreva apenas "medicação sintomática" ou "receita entregue" sem nomear).
      MODELO:
-     "- Administrar na UPA: Tenoxicam 20 mg IM + Dipirona 1 g (2 mL) EV, agora.
-- Reavaliar após o efeito; se melhora, alta com sinais de alerta (piora súbita, febre, déficit).
-- Receita domiciliar: Naproxeno 500 mg 12/12h por 5 dias e Metoclopramida 10 mg se náusea.
-- Encaminhar para acompanhamento na APS."
+     "- Faço na UPA: Tenoxicam 20 mg IM + Dipirona 1 g (2 mL) EV, agora.
+- Reavalio após o efeito; se melhora, alta com sinais de alerta (piora súbita, febre, déficit).
+- Prescrevo para casa: Naproxeno 500 mg de 12/12 horas por 5 dias e Metoclopramida 10 mg de 8/8 horas se náusea.
+- Encaminho para acompanhamento na APS."
      (campo 06)
 
 4. "prescricao_interna": medicações usadas NA UPA. APENAS itens da lista desta
@@ -1150,6 +1264,11 @@ Neurológico: ECG 15, pupilas isocóricas e fotorreagentes, pares cranianos pres
    DOSE FECHADA OBRIGATÓRIA: a posologia NÃO pode delegar a decisão ao paciente.
    É PROIBIDO escrever faixas como "tomar 1 a 2 comprimidos" ou "1-2 comprimidos"
    — defina UMA dose única ("tomar 1 comprimido" OU "tomar 2 comprimidos").
+   FREQUÊNCIA EM INTERVALO DE HORAS OBRIGATÓRIA: escreva a frequência como
+   intervalo ("de 12/12 horas", "de 8/8 horas", "de 6/6 horas"), NUNCA como
+   "até 3x ao dia", "4 vezes ao dia" ou "3x/dia". Para uso condicional,
+   combine o intervalo com a condição (ex.: "de 8/8 horas se náusea").
+   Exceção: "1x ao dia" é permitido (é o formato natural de dose única diária).
    AO FINAL DA RECEITA, acrescente SEMPRE um bloco curto de ORIENTAÇÕES NÃO
    MEDICAMENTOSAS, com no MÁXIMO 3 a 4 itens objetivos e pertinentes ao quadro
    (ex.: hidratação, repouso, sinais de alerta para retornar, cuidados locais,
@@ -1160,7 +1279,7 @@ Neurológico: ECG 15, pupilas isocóricas e fotorreagentes, pares cranianos pres
    Tomar 1 comprimido de 12/12 horas por 5 dias.
 
 2. Metoclopramida 10 mg ......................... 1 caixa
-   Tomar 1 comprimido até 3x ao dia se náusea.
+   Tomar 1 comprimido de 8/8 horas se náusea.
 
 ORIENTAÇÕES:
 - Repouso relativo e hidratação oral abundante.
@@ -1212,14 +1331,23 @@ ${mensagem}`;
                 dados.prontuario.exame_fisico_texto = preferirInalacao(dados.prontuario.exame_fisico_texto);
             }
 
-            // --- Tempo verbal: infinitivo na conduta (prontuário é redigido
-            //     ANTES de executar a conduta) ---
+            // --- Tempo verbal: PRIMEIRA PESSOA na conduta (v6: "faço,
+            //     prescrevo, solicito, oriento") ---
             if (dados.prontuario) {
-                dados.prontuario.conduta = preferirInfinitivoConduta(dados.prontuario.conduta);
+                dados.prontuario.conduta = preferirPrimeiraPessoaConduta(dados.prontuario.conduta);
             }
 
             // --- Receita: fecha doses flexíveis ("1 a 2 comp" -> "1 comp") ---
             dados.receita = fecharDoseFlexivel(dados.receita);
+
+            // --- Frequência em horas (v6): "até 3x ao dia" -> "de 8/8 horas"
+            //     na receita, prescrição interna, conduta e evolução ---
+            dados.receita = preferirIntervaloHoras(dados.receita);
+            dados.prescricao_interna = preferirIntervaloHoras(dados.prescricao_interna);
+            dados.evolucao = preferirIntervaloHoras(dados.evolucao);
+            if (dados.prontuario) {
+                dados.prontuario.conduta = preferirIntervaloHoras(dados.prontuario.conduta);
+            }
 
             // --- Movimento 1: formatação estrutural garantida pelo servidor ---
             // (transformações mecânicas; não dependem de juízo clínico)
@@ -1246,11 +1374,22 @@ ${mensagem}`;
                 dados.discussao = (dados.discussao || '') + aviso;
             }
 
-            // --- Diluições (SÓ Barreiro) ---
+            // --- Diluições ---
+            // BARREIRO: bloco separado (como sempre foi).
+            // ACRÍZIO (v6): diluição NA MESMA LINHA da prescrição interna
+            //   (exigência nova da unidade); o campo diluicoes fica vazio.
             dados.diluicoes = '';
             if (unidade === 'BARREIRO') {
                 const dil = montarDiluicoes(dados.prescricao_interna);
                 dados.diluicoes = dil.blocoSeparado;
+                if (dil.naoEncontrados.length > 0) {
+                    const aviso = '\n\n💧 DILUIÇÃO NÃO ENCONTRADA na tabela de referência (consultar manualmente):\n- '
+                        + dil.naoEncontrados.join('\n- ');
+                    dados.discussao = (dados.discussao || '') + aviso;
+                }
+            } else if (unidade === 'ACRIZIO') {
+                const dil = anexarDiluicaoInline(dados.prescricao_interna);
+                dados.prescricao_interna = dil.texto;
                 if (dil.naoEncontrados.length > 0) {
                     const aviso = '\n\n💧 DILUIÇÃO NÃO ENCONTRADA na tabela de referência (consultar manualmente):\n- '
                         + dil.naoEncontrados.join('\n- ');
