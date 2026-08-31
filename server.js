@@ -17,6 +17,11 @@
 //      - Trava dupla: instrução no prompt + limparExamesComplementares no
 //        servidor, que ZERA o campo quando vier vazio, só com rótulo, ou com
 //        placeholder negativo ("não realizados", "sem exames", "nenhum").
+//      - FORMATO ENXUTO: TODO exame laboratorial numa ÚNICA linha (separados
+//        por " | "), ECG em linha própria e cada exame de imagem em linha
+//        própria. Sem valores de referência. Só os resultados PRINCIPAIS de
+//        cada exame (ex.: do hemograma, Hb/leucócitos/plaquetas) mais o que
+//        estiver muito alterado — nunca o laudo inteiro.
 //      - NUNCA inventa resultado (regra inegociável nº 11) e sempre traz a
 //        DATA/momento do exame; se o médico não informou data nenhuma, o
 //        servidor acrescenta um lembrete curto na discussão (avisarSemData).
@@ -1319,11 +1324,31 @@ INSTRUÇÕES DE CADA CAMPO:
    médico deu ("na admissão", "hoje 14h", "31/08"). Se ele não informou data
    nem momento algum, NÃO invente: escreva o exame sem data e sinalize na
    "discussao" que a data do exame não foi informada.
-   FORMATO: um exame por linha (quebra real \\n), no padrão
-   "Nome do exame (data/momento): achado descritivo e assertivo."
+   FORMATO — REGRA CENTRAL: SEJA CURTO. Este campo é um resumo objetivo, não a
+   transcrição do laudo.
+   (a) TODOS OS EXAMES LABORATORIAIS VÃO NUMA ÚNICA LINHA, juntos, começando por
+       "Laboratório (data/momento):" e separados por " | ". NÃO crie uma linha
+       para hemograma, outra para PCR, outra para creatinina, outra para
+       eletrólitos — isso é PROIBIDO; é tudo uma linha só. Entram nessa linha
+       também gasometria, glicemia capilar e testes rápidos.
+       Mantenha juntos os valores do MESMO exame (ex.: Hb e Ht lado a lado, não
+       um no começo e outro no fim da linha).
+   (b) ECG vai em LINHA PRÓPRIA.
+   (c) Cada exame de IMAGEM ou gráfico (raio-X, USG, TC, ecocardiograma) vai em
+       LINHA PRÓPRIA, com a conclusão em uma frase.
+   SELEÇÃO DO QUE ENTRA (importante): NÃO despeje o laudo inteiro. Escolha os
+   resultados PRINCIPAIS de cada exame, mais qualquer valor MUITO ALTERADO que
+   chame atenção clinicamente. Exemplos do que basta: de um hemograma, hemoglobina,
+   leucócitos (com desvio, se houver) e plaquetas; de um exame de urina, os
+   achados relevantes (leucocitúria, nitrito, hematúria), não a tabela toda.
+   Use seu julgamento clínico para o que é relevante ao caso — mas o padrão é
+   ENXUTO, e nunca liste um parâmetro só para preencher espaço.
+   NUNCA escreva VALORES DE REFERÊNCIA (nada de "(VR: 12–16)"). Unidades só
+   quando forem necessárias para não gerar ambiguidade.
    MODELO:
    "ECG (admissão, 31/08 09:20): ritmo sinusal, FC 78 bpm, sem alterações isquêmicas agudas.
-Hemograma (31/08): Hb 12,4 g/dL, leucócitos 9.800/mm³ sem desvio, plaquetas 210.000/mm³."
+Laboratório (31/08): Hb 12,4 | Ht 37% | leucócitos 9.800 sem desvio | plaquetas 210.000 | PCR 48 | creatinina 1,1 | Na 138 | K 4,2.
+Raio-X de tórax (31/08): sem consolidações ou derrame pleural."
    Linguagem DESCRITIVA E ASSERTIVA, como os demais campos do prontuário: se
    houver dúvida de interpretação, ela vai na "discussao", nunca aqui.
 
@@ -1837,22 +1862,3 @@ app.post('/api/ponte', limitarAbuso, async (req, res) => {
     } catch (e) {
         console.error('Erro ao receber fotos da ponte:', e);
         res.status(500).json({ erro: 'Falha ao receber as fotos.' });
-    }
-});
-
-//  2) Entrega as fotos de um código e as APAGA (código de uso único).
-app.get('/api/ponte/:codigo', async (req, res) => {
-    const codigo = String(req.params.codigo || '');
-    const fotos = await lerFotosPonte(codigo);
-    if (fotos === null) {
-        return res.status(404).json({ erro: 'Código inválido ou expirado (vale 30 minutos e funciona uma única vez). Gere um novo código no outro aparelho.' });
-    }
-    // Uso único: apaga na entrega (em segundo plano, sem atrasar a resposta).
-    apagarFotosPonte(codigo).catch(() => {});
-    res.json({ fotos });
-});
-
-app.get('/', (req, res) => res.send('Servidor do Prontuário Rápido (v4) no ar.'));
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log('Servidor rodando na porta ' + PORT));
