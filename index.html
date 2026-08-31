@@ -565,6 +565,7 @@
         {key:'historia_pregressa', titulo:'02 – História Pregressa',                        tituloCopia:'HISTÓRIA PREGRESSA'},
         {key:'sinais_vitais',      titulo:'03 – Sinais Vitais (campos próprios no SIGRAH)', vital:true, tituloCopia:'SINAIS VITAIS'},
         {key:'exame_fisico_texto', titulo:'03 – Exame Físico (texto)',                      tituloCopia:'EXAME FÍSICO'},
+        {key:'exames_complementares', titulo:'Exames Complementares',                        tituloCopia:'EXAMES COMPLEMENTARES'},
         {key:'hipotese_diagnostica',titulo:'04 – Hipótese Diagnóstica',                     tituloCopia:'HIPÓTESE DIAGNÓSTICA'},
         {key:'conduta',            titulo:'06 – Condutas',                                  tituloCopia:'CONDUTAS'}
     ];
@@ -599,10 +600,14 @@
         } else { doc.style.display = 'none'; }
     }
 
-    function montarProntuario(pront){
+    // 'exames' (v7) = campo exames_complementares, que vem FORA do objeto
+    // prontuario mas é exibido como uma caixa do prontuário, entre o Exame
+    // Físico e a Hipótese Diagnóstica. Vem vazio no modo Evolução (lá o
+    // servidor já colou o conteúdo dentro do texto corrido da evolução).
+    function montarProntuario(pront, exames){
         const grupo = document.getElementById('grupoProntuario');
         grupo.innerHTML = '';
-        if(!pront) return;
+        if(!pront) pront = {};
 
         // ACRÍZIO: os sinais vitais NÃO vão num quadro separado — entram como a
         // PRIMEIRA LINHA do exame físico (o Acrízio usa prontuário corrido, não
@@ -619,6 +624,7 @@
             }
             pView.sinais_vitais = ''; // não renderiza o quadro separado
         }
+        pView.exames_complementares = (exames || '').trim();
 
         CAMPOS_PRONT.forEach((c,i)=>{
             const val = pView[c.key];
@@ -668,7 +674,11 @@
         setBox('cidWrap','resCid', data.cid);
         document.getElementById('cidWrap').style.display = (data.cid && data.cid.trim()) ? 'block':'none';
         setBox('docEvolucao','resEvolucao', data.evolucao);
-        montarProntuario(data.prontuario);
+        // Na EVOLUÇÃO o resultado do exame já está DENTRO do texto da evolução
+        // (colado pelo servidor, no fim, após uma linha em branco) — por isso
+        // a caixa própria só é montada quando NÃO é evolução.
+        const ehEvol = !!(data.evolucao && data.evolucao.trim());
+        montarProntuario(data.prontuario, ehEvol ? '' : data.exames_complementares);
         setBox('docPresc','resPresc', data.prescricao_interna);
         setBox('docDiluicao','resDiluicao', data.diluicoes);
         setBox('docReceita','resReceita', data.receita);
