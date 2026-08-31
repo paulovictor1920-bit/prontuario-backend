@@ -1,5 +1,36 @@
 // ============================================================================
-//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v6
+//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v7
+//
+//  Novidades da v7 (31/ago/2026) — duas frentes (fatia 1 do roteiro v7):
+//   1) CAMPO NOVO "exames_complementares" (Exames Prévios Realizados): lugar
+//      FIXO e previsível para o RESULTADO de exame complementar (ECG, labora-
+//      tório, imagem, glicemia, gasometria, teste rápido). Antes não existia
+//      campo nenhum para RESULTADO — só exame_unidade/exame_externo, que são
+//      PEDIDOS — e por isso a IA jogava o resultado ora no exame físico, ora
+//      na discussão, ora no meio da evolução.
+//      - NÃO depende de toggle: existe quando o médico mencionar um exame
+//        (no relato ou em anexo) e não existe quando não mencionar.
+//      - PRONTUÁRIO: caixa "Exames Complementares", entre o Exame Físico e a Hipótese.
+//      - EVOLUÇÃO: o SERVIDOR cola o conteúdo no FIM do texto da evolução,
+//        separado por linha em branco (posição determinística; a IA não
+//        escolhe onde). Sem rótulo, direto o conteúdo.
+//      - Trava dupla: instrução no prompt + limparExamesComplementares no
+//        servidor, que ZERA o campo quando vier vazio, só com rótulo, ou com
+//        placeholder negativo ("não realizados", "sem exames", "nenhum").
+//      - NUNCA inventa resultado (regra inegociável nº 11) e sempre traz a
+//        DATA/momento do exame; se o médico não informou data nenhuma, o
+//        servidor acrescenta um lembrete curto na discussão (avisarSemData).
+//      - SOBREVIVÊNCIA NO HISTÓRICO: o campo é salvo na etapa e também entra
+//        no RESUMO das etapas do meio (resumirEtapaHistorico), para o valor
+//        transcrito de uma foto continuar disponível nas etapas seguintes —
+//        as fotos continuam NÃO sendo gravadas (LGPD/limite do Redis).
+//   2) EVOLUÇÃO SEM CONDUTA REPETIDA E CONDUTA MAIS ENXUTA: o texto da
+//      evolução vinha terminando com uma linha que já repetia o campo
+//      Conduta, e a conduta vinha com 6-7 itens. Corrigido NO PROMPT (proibida
+//      a conduta dentro do texto da evolução; conduta com 3 a 4 itens, nunca
+//      mais que 4). DE PROPÓSITO não há corte automático no servidor: apagar
+//      item de conduta por regex é risco clínico (poderia cortar justo o
+//      "Encaminho ao hospital"). Se escapar, o médico apaga a linha.
 //
 //  Novidades da v6 (24/jul/2026) — três ajustes:
 //   1) RECEITA COM FREQUÊNCIA EM HORAS: a posologia domiciliar sai SEMPRE em
@@ -586,6 +617,61 @@ function normalizarSeparadorVitais(txt) {
     return s.trim();
 }
 
+// ---------------------------------------------------------------------------
+//  EXAMES COMPLEMENTARES (v7) — três funções pequenas e determinísticas.
+// ---------------------------------------------------------------------------
+
+// (1) TRAVA: o campo só pode existir se tiver CONTEÚDO DE VERDADE. Zera quando
+// vier vazio, só com o rótulo, ou com um placeholder negativo ("não foram
+// realizados exames", "sem exames complementares", "nenhum", "não informado").
+// Motivo: a regra inegociável nº 4 vale aqui igual aos sinais vitais — nada de
+// caixa vazia nem rótulo em branco na tela. Conservador: se sobrar QUALQUER
+// conteúdo clínico além do placeholder, o campo é preservado inteiro.
+function limparExamesComplementares(txt) {
+    if (!txt || typeof txt !== 'string') return '';
+    let s = txt.trim();
+    if (!s) return '';
+    // Tira um rótulo que a IA tenha colocado na frente ("Exames complementares:")
+    s = s.replace(/^\s*exames?\s+(complementar(es)?|pr[ée]vios?( realizados?)?)\s*:?\s*/i, '').trim();
+    if (!s) return '';
+    // Só pontuação/traços ("-", "--", "—", ".") não é conteúdo clínico.
+    if (/^[-–—._\s]+$/.test(s)) return '';
+    // Placeholders negativos: só zera se a resposta INTEIRA for o placeholder
+    // (curta e sem números), para nunca apagar um resultado de verdade.
+    const semAcentoTxt = semAcento(s.toLowerCase());
+    const ehNegativa = /^(nao|sem|nenhum|n\/a|na|-{1,3}|nada)\b/.test(semAcentoTxt)
+        || /^(exames?\s+)?(nao\s+realizados?|nao\s+informados?|nao\s+se\s+aplica)\b/.test(semAcentoTxt);
+    if (ehNegativa && s.length <= 120 && !/\d/.test(s)) return '';
+    return s;
+}
+
+// (2) LEMBRETE DE DATA: o Paulo pediu que TODO exame venha com a data (ou o
+// momento: "na admissão", "hoje 14h"). Esta função NÃO inventa nem altera nada
+// — só detecta a AUSÊNCIA total de referência temporal para o servidor
+// acrescentar um lembrete curto na discussão. Devolve true = está sem data.
+function examesSemReferenciaDeData(txt) {
+    if (!txt || typeof txt !== 'string') return false;
+    const s = semAcento(txt.toLowerCase());
+    if (/\d{1,2}\s*\/\s*\d{1,2}/.test(s)) return false; // achou dd/mm -> tem data
+    const temHora = /\b\d{1,2}\s*[:h]\s*\d{0,2}\b/.test(s);
+    const temPalavra = /\b(admissao|chegada|entrada|hoje|ontem|agora|previo|previa|anterior|reavaliacao|na upa|coletado|realizado em|data)\b/.test(s);
+    return !(temHora || temPalavra);
+}
+
+// (3) POSIÇÃO NA EVOLUÇÃO: na evolução o resultado NÃO vai numa caixa solta —
+// vai no FIM do texto corrido, separado por uma linha em branco (decisão do
+// médico em 31/ago). Quem posiciona é o servidor, não a IA: assim o lugar é
+// sempre o mesmo. Sem rótulo — entra direto o conteúdo ("ECG (admissão): ...").
+// Idempotente: se o texto já termina com exatamente esse conteúdo, não duplica.
+function anexarExamesNaEvolucao(evolucao, exames) {
+    const ex = (exames || '').trim();
+    if (!ex) return evolucao || '';
+    const base = (evolucao || '').trim();
+    if (!base) return ex;
+    if (base.endsWith(ex)) return base;   // já está lá (não duplica)
+    return base + '\n\n' + ex;
+}
+
 // Se um "CID: ..." vazou para dentro da conduta ou do exame físico (campos que
 // NÃO devem conter o CID, pois ele tem campo próprio), remove essa linha.
 // Conservador: só remove a LINHA que começa com "CID:" — não toca no resto.
@@ -628,12 +714,19 @@ function resumirEtapaHistorico(etapa) {
         let trecho = (evol || conduta || '').replace(/\s+/g, ' ').trim();
         if (trecho.length > 240) trecho = trecho.slice(0, 240) + '…';
         const data = etapa && etapa.quando ? new Date(etapa.quando).toLocaleString('pt-BR') : '';
-        return {
+        const saida = {
             _resumo: true,
             tipo: (etapa && etapa.tipo) ? etapa.tipo : 'prontuario',
             quando: data,
             resumo: trecho || '(sem conduta/evolução registrada)'
         };
+        // v7: RESULTADO DE EXAME NUNCA É RESUMIDO FORA. Se aquela etapa teve
+        // exame complementar (inclusive valor transcrito de uma foto, que não
+        // é guardada), ele vai INTEIRO no resumo — é dado numérico que não pode
+        // se perder, sob pena de a IA "preencher a lacuna" numa etapa seguinte.
+        const ex = (r.exames_complementares || '').trim();
+        if (ex) saida.exames_complementares = ex;
+        return saida;
     } catch (e) {
         return { _resumo: true, resumo: '(etapa anterior — resumo indisponível)' };
     }
@@ -1103,6 +1196,7 @@ REGRAS DE SAÍDA (responda em JSON puro com EXATAMENTE estas chaves):
   "discussao": "",
   "cid": "",
   "evolucao": "",
+  "exames_complementares": "",
   "prontuario": {
      "historia_clinica": "",
      "historia_pregressa": "",
@@ -1193,6 +1287,45 @@ INSTRUÇÕES DE CADA CAMPO:
    Quando for EVOLUÇÃO, deixe os subcampos do "prontuario" VAZIOS (exceto
    "conduta", que deve ser preenchida). Quando NÃO for evolução, deixe
    "evolucao" como "".
+   PROIBIDO TERMINAR A EVOLUÇÃO COM A CONDUTA (regra importante): o texto da
+   evolução descreve APENAS o ESTADO do paciente na reavaliação. Ele NÃO pode
+   terminar — nem conter — frases de plano/conduta do tipo "mantenho a
+   medicação", "prescrevo...", "solicito...", "oriento...", "aguardo vaga",
+   "alta com orientações", "encaminho para...". Tudo isso pertence
+   EXCLUSIVAMENTE ao campo "conduta", que aparece logo abaixo na tela e seria
+   lido duas vezes. Encerre a evolução na descrição clínica (ex.: "...mantém-se
+   afebril, eupneico, aceitando dieta."), e PARE ali.
+   NÃO escreva os resultados de exame dentro deste texto: eles vão no campo
+   "exames_complementares" (item 2c) e o sistema os posiciona sozinho no lugar
+   certo, no fim da evolução.
+
+2c. "exames_complementares": o RESULTADO de exames complementares — ou seja,
+   tudo que NÃO é exame físico: ECG, laboratório (hemograma, PCR, troponina,
+   eletrólitos, função renal), imagem (raio-X, USG, TC), glicemia capilar,
+   gasometria, teste rápido, etc. Vale tanto para PRONTUÁRIO quanto para
+   EVOLUÇÃO. Atenção: NÃO confundir com "exame_unidade"/"exame_externo", que
+   são PEDIDOS de exame — aqui é o RESULTADO.
+   QUANDO PREENCHER: somente quando o médico informar um resultado no relato
+   OU quando houver um resultado legível num anexo (foto/documento). Se não
+   houver NENHUM exame complementar, deixe o campo TOTALMENTE VAZIO ("") — não
+   escreva "não realizados", "sem exames" nem qualquer rótulo em branco; o
+   campo simplesmente não deve existir.
+   PROIBIDO INVENTAR (regra inegociável): NUNCA crie, estime, complete ou
+   "arredonde" um resultado, valor, unidade ou laudo que o médico não informou
+   e que não esteja legível no anexo. Valor ilegível vira "[ilegível]" e você
+   avisa na "discussao". Transcreva números e unidades EXATAMENTE como estão.
+   DATA OBRIGATÓRIA: todo exame vem com a DATA ou o momento em que foi feito,
+   entre parênteses, logo após o nome do exame — usando a referência que o
+   médico deu ("na admissão", "hoje 14h", "31/08"). Se ele não informou data
+   nem momento algum, NÃO invente: escreva o exame sem data e sinalize na
+   "discussao" que a data do exame não foi informada.
+   FORMATO: um exame por linha (quebra real \\n), no padrão
+   "Nome do exame (data/momento): achado descritivo e assertivo."
+   MODELO:
+   "ECG (admissão, 31/08 09:20): ritmo sinusal, FC 78 bpm, sem alterações isquêmicas agudas.
+Hemograma (31/08): Hb 12,4 g/dL, leucócitos 9.800/mm³ sem desvio, plaquetas 210.000/mm³."
+   Linguagem DESCRITIVA E ASSERTIVA, como os demais campos do prontuário: se
+   houver dúvida de interpretação, ela vai na "discussao", nunca aqui.
 
 3. "prontuario" — preencha cada subcampo SEPARADAMENTE para encaixar no SIGRAH.
    IMPORTANTE: o prontuário é DOCUMENTO DESCRITIVO E ASSERTIVO, não de reflexão.
@@ -1225,8 +1358,11 @@ Neurológico: ECG 15, pupilas isocóricas e fotorreagentes, pares cranianos pres
    - "hipotese_diagnostica": a(s) hipótese(s) em texto. (campo 04)
    - "conduta": condutas e orientações. SEJA CONCISO — nada de "encher
      linguiça". Comece direto pelos ITENS COM HÍFEN, um por linha (quebra real
-     \\n). Mire em 3 a 5 itens curtos e objetivos; agrupe ações relacionadas no
-     mesmo item.
+     \\n). Escreva de 3 a 4 itens curtos e objetivos — NUNCA
+     mais que 4. Se o caso parecer pedir 5, 6 ou 7 itens, é sinal de que você
+     está fatiando demais: AGRUPE ações relacionadas no mesmo item (todas as
+     medicações da UPA numa linha, toda a receita domiciliar em outra, alta +
+     sinais de alerta + encaminhamento juntos).
      TEMPO VERBAL OBRIGATÓRIO: use SEMPRE a PRIMEIRA PESSOA DO SINGULAR no
      presente — "faço", "prescrevo", "solicito", "oriento", "encaminho",
      "administro", "reavalio", "mantenho". É o estilo consagrado de conduta
@@ -1356,6 +1492,24 @@ ${mensagem}`;
                 dados.prontuario.conduta = removerCidVazado(dados.prontuario.conduta);
                 dados.prontuario.exame_fisico_texto = removerCidVazado(dados.prontuario.exame_fisico_texto);
                 dados.prontuario.sinais_vitais = normalizarSeparadorVitais(dados.prontuario.sinais_vitais);
+            }
+
+            // --- EXAMES COMPLEMENTARES (v7) ---
+            // Trava: só existe se tiver conteúdo real (nada de rótulo vazio nem
+            // de "não foram realizados"). NÃO depende de toggle nenhum.
+            dados.exames_complementares = limparExamesComplementares(dados.exames_complementares);
+            if (dados.exames_complementares) {
+                // Lembrete de data (não altera o conteúdo; só avisa na discussão).
+                if (examesSemReferenciaDeData(dados.exames_complementares)) {
+                    dados.discussao = (dados.discussao || '')
+                        + '\n\n🗓️ A DATA/momento do exame complementar não foi informada — complete antes de registrar no prontuário.';
+                }
+                // Na EVOLUÇÃO, o resultado NÃO vira caixa solta: entra no fim do
+                // texto corrido, separado por linha em branco. Quem posiciona é
+                // o servidor (determinístico), não a IA.
+                if (ehEvolucao) {
+                    dados.evolucao = anexarExamesNaEvolucao(dados.evolucao, dados.exames_complementares);
+                }
             }
 
             // --- TRAVAS DE SEGURANÇA (servidor manda, não a IA) ---
