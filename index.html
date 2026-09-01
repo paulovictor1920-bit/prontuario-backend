@@ -1,4 +1,18 @@
 <!DOCTYPE html>
+<!--
+  PRONTUÁRIO RÁPIDO - TELA (FRONTEND) - v7.1 - 31/ago/2026
+  Novidades desta versão (fatias 2 e 3 do roteiro v7):
+   1) JANELA DE CONFIRMAÇÃO antes de gerar (sempre obrigatória): mostra BE,
+      sexo e idade em destaque, mais unidade, tipo de documento, IA escolhida,
+      toggles ligados e contagem de anexos. "Corrigir" fecha sem perder nada.
+   2) BOTÃO "CANCELAR GERAÇÃO" enquanto a IA trabalha: aborta o pedido, o
+      servidor corta a chamada à IA e NADA é gravado no histórico do BE.
+      Tudo o que estava digitado permanece na tela.
+   3) ANEXO DE PDF (antes só imagem): o PDF não passa pela compressão (que o
+      destruiria), tem teto de 4 MB com erro claro, e NÃO vai pela ponte por
+      código (só fotos) — nesse caso ele fica anexado neste aparelho.
+  Precisa do server.js v7.1 no Render: os dois arquivos sobem JUNTOS.
+-->
 <html lang="pt-BR" data-tema="escuro">
 <head>
 <meta charset="UTF-8">
@@ -135,6 +149,41 @@
     .anexo-thumb .remover{position:absolute; right:3px; top:3px; background:#b71c1c; color:#fff;
         border:none; width:20px; height:20px; border-radius:50%; cursor:pointer; font-size:12px;
         line-height:18px; padding:0;}
+    /* v7.1 — miniatura de PDF: não dá para mostrar prévia, então vira um
+       cartão com o ícone e o nome do arquivo. */
+    .anexo-thumb.pdf{display:flex; flex-direction:column; align-items:center; justify-content:center;
+        background:#8e2a2a; color:#fff; text-align:center; padding:4px;}
+    .anexo-thumb.pdf .ico{font-size:24px; line-height:1;}
+    .anexo-thumb.pdf .nome{font-size:9px; margin-top:4px; word-break:break-all;
+        max-height:32px; overflow:hidden;}
+    /* v7.1 — botão de cancelar a geração em andamento. */
+    .btn-cancelar{display:none; background:#b71c1c; color:#fff; border:none;
+        padding:11px 16px; border-radius:5px; cursor:pointer; font-size:14px;
+        font-weight:bold; width:100%; margin-bottom:10px;}
+    .btn-cancelar:hover{background:#d32f2f;}
+    /* v7.1 — JANELA DE CONFIRMAÇÃO antes de gerar. Feita à mão (não é o
+       confirm() do navegador) para caber bem no celular e mostrar os dados
+       que mais erram na troca de paciente: BE, sexo e idade. */
+    .modal-fundo{display:none; position:fixed; inset:0; background:rgba(0,0,0,.68);
+        z-index:9999; align-items:center; justify-content:center; padding:16px;}
+    .modal-fundo.aberto{display:flex;}
+    .modal-caixa{background:var(--panel); color:var(--texto); border-radius:10px;
+        border:1px solid var(--line); max-width:420px; width:100%;
+        max-height:90vh; overflow-y:auto; padding:18px 18px 16px;
+        box-shadow:0 10px 40px rgba(0,0,0,.5);}
+    .modal-caixa h3{margin:0 0 12px; font-size:17px; color:var(--titulo); border:none;}
+    .modal-destaque{background:var(--box); border:2px solid var(--azul); border-radius:8px;
+        padding:12px; text-align:center; margin-bottom:12px;}
+    .modal-destaque .be{font-size:26px; font-weight:bold; color:var(--azul); line-height:1.2;
+        word-break:break-all;}
+    .modal-destaque .demo{font-size:17px; font-weight:bold; margin-top:4px; color:var(--titulo);}
+    .modal-linha{font-size:14px; margin:6px 0; line-height:1.45;}
+    .modal-linha strong{color:var(--titulo);}
+    .modal-botoes{display:flex; gap:10px; margin-top:16px;}
+    .modal-botoes button{flex:1; padding:13px 10px; border-radius:6px; border:none;
+        font-size:14px; font-weight:bold; cursor:pointer;}
+    .modal-ok{background:var(--verde); color:#fff;}
+    .modal-voltar{background:transparent; color:var(--nota); border:1px solid var(--line) !important;}
     .aviso-fotos{background:#1f4d2e; color:#fff; border-radius:6px; padding:8px 12px;
         margin-top:10px; font-size:13px; display:none;}
     .codigo-destaque{font-size:22px; letter-spacing:6px; font-weight:bold; display:block; margin-top:4px;}
@@ -216,10 +265,10 @@
          chegam anexadas, sem precisar do BE e sem recarregar a página. -->
     <div class="anexos-wrap">
         <div class="anexos-top">
-            <span class="lbl">📎 Fotos de documentos (até 9)</span>
-            <button class="btn-anexo" onclick="document.getElementById('inputFoto').click()">📷 Anexar foto</button>
+            <span class="lbl">📎 Fotos e PDFs de documentos (até 9)</span>
+            <button class="btn-anexo" onclick="document.getElementById('inputFoto').click()">📷 Anexar foto ou PDF</button>
         </div>
-        <input type="file" id="inputFoto" accept="image/*" multiple style="display:none" onchange="anexarLocais(this.files)">
+        <input type="file" id="inputFoto" accept="image/*,application/pdf" multiple style="display:none" onchange="anexarLocais(this.files)">
         <div class="anexos-lista" id="listaAnexos"></div>
         <div id="avisoFotos" class="aviso-fotos"></div>
         <div class="ponte-row">
@@ -227,7 +276,7 @@
             <input type="text" id="codigoPonte" maxlength="4" inputmode="numeric" placeholder="0000">
             <button class="btn-anexo" onclick="receberPorCodigo()">🔑 Receber por código</button>
         </div>
-        <div class="nota">A IA só usa as fotos conforme a sua instrução no relato (ex.: "transcreva o hemograma da foto no prontuário"). A foto nunca vira documento sozinha, não entra no histórico e é apagada do servidor ao ser recebida. <strong>No celular:</strong> anexe as fotos e toque em "📤 Gerar código" — anote o código de 4 dígitos. <strong>No computador:</strong> digite o código e toque em "🔑 Receber". Cada código vale 30 minutos e funciona uma única vez.</div>
+        <div class="nota">A IA só usa os anexos conforme a sua instrução no relato (ex.: "transcreva o hemograma da foto no prontuário"). O anexo nunca vira documento sozinho, não entra no histórico e é apagado do servidor ao ser recebido. <strong>PDF:</strong> aceito no anexo direto (até ~4 MB), mas <strong>não passa pela ponte por código</strong> — nesse caso anexe o PDF no próprio aparelho em que for gerar. <strong>No celular:</strong> anexe as fotos e toque em "📤 Gerar código" — anote o código de 4 dígitos. <strong>No computador:</strong> digite o código e toque em "🔑 Receber". Cada código vale 30 minutos e funciona uma única vez.</div>
     </div>
 
     <div class="toggle-upa">
@@ -273,9 +322,36 @@
     </div>
 
     <div class="loading" id="loading">🧠 Processando raciocínio e documentos...</div>
+    <!-- v7.1: só aparece enquanto a IA está gerando. -->
+    <button id="btnCancelar" class="btn-cancelar" onclick="cancelarGeracao()">🛑 Cancelar geração</button>
     <div class="linha-acoes">
         <button id="btnEnviar" class="btn-main" onclick="enviarDados()">🚀 Enviar Entrada</button>
         <button class="btn-limpar" onclick="limpar()">🧹 Limpar relato</button>
+    </div>
+</div>
+
+<!-- ====================================================================
+     v7.1 — JANELA DE CONFIRMAÇÃO (aparece SEMPRE, antes de qualquer
+     chamada de IA). Mostra em destaque BE, sexo e idade, que são os
+     campos que mais escapam na troca de paciente. "Corrigir" fecha sem
+     perder nada do que já foi digitado.
+     ==================================================================== -->
+<div class="modal-fundo" id="modalConfirmar" onclick="if(event.target===this) fecharConfirmacao()">
+    <div class="modal-caixa">
+        <h3>Confere antes de gerar</h3>
+        <div class="modal-destaque">
+            <div class="be" id="confBe">—</div>
+            <div class="demo" id="confDemo">—</div>
+        </div>
+        <div class="modal-linha"><strong>Unidade:</strong> <span id="confUnidade">—</span></div>
+        <div class="modal-linha"><strong>Documento:</strong> <span id="confTipo">—</span></div>
+        <div class="modal-linha"><strong>Cérebro da IA:</strong> <span id="confModelo">—</span></div>
+        <div class="modal-linha"><strong>Ligados:</strong> <span id="confToggles">—</span></div>
+        <div class="modal-linha"><strong>Anexos:</strong> <span id="confAnexos">—</span></div>
+        <div class="modal-botoes">
+            <button class="modal-voltar" onclick="fecharConfirmacao()">✏️ Corrigir</button>
+            <button class="modal-ok" onclick="confirmarEnvio()">✅ Confirmar e gerar</button>
+        </div>
     </div>
 </div>
 
@@ -386,6 +462,11 @@
         opts = opts || {};
         opts.headers = Object.assign({}, opts.headers || {}, {'x-senha': SENHA});
         const resp = await fetch(url, opts);
+        // v7.1 — CUIDADO IMPORTANTE: se o pedido foi CANCELADO pelo médico, o
+        // fetch lança AbortError (não chega aqui). Mas se por acaso o servidor
+        // responder 401 depois de um cancelamento, NÃO se pode reenviar: seria
+        // refazer justamente o pedido que ele mandou parar (e pagar de novo).
+        if(opts.signal && opts.signal.aborted){ return resp; }
         if(resp.status === 401 && !jaTentou){
             pedirSenha('Senha ausente ou incorreta. Digite a senha de acesso');
             return fetchAPI(url, opts, true);
@@ -405,10 +486,21 @@
         wrap.innerHTML = '';
         anexos.forEach(a=>{
             const d = document.createElement('div');
-            d.className = 'anexo-thumb';
-            const img = document.createElement('img');
-            img.src = 'data:' + a.mimeType + ';base64,' + a.data;
-            d.appendChild(img);
+            const ehPdf = a.mimeType === 'application/pdf';
+            d.className = ehPdf ? 'anexo-thumb pdf' : 'anexo-thumb';
+            if(ehPdf){
+                // PDF não tem prévia: mostra ícone + nome do arquivo.
+                const ico = document.createElement('div');
+                ico.className = 'ico'; ico.innerText = '📄';
+                d.appendChild(ico);
+                const nm = document.createElement('div');
+                nm.className = 'nome'; nm.innerText = a.nome || 'PDF';
+                d.appendChild(nm);
+            } else {
+                const img = document.createElement('img');
+                img.src = 'data:' + a.mimeType + ';base64,' + a.data;
+                d.appendChild(img);
+            }
             const tag = document.createElement('span');
             tag.className = 'origem';
             tag.innerText = a.origem === 'celular' ? '🔑' : '📎';
@@ -419,9 +511,10 @@
             d.appendChild(x);
             wrap.appendChild(d);
         });
-        // O botão da ponte só aparece quando há fotos LOCAIS para mandar.
+        // O botão da ponte só aparece quando há FOTOS locais para mandar.
+        // v7.1: PDF não conta — a ponte não transporta PDF (limite do Upstash).
         document.getElementById('btnPonte').style.display =
-            anexos.some(a=>a.origem==='local') ? 'inline-block' : 'none';
+            anexos.some(a=>a.origem==='local' && a.mimeType!=='application/pdf') ? 'inline-block' : 'none';
     }
     let avisoTimer = null;
     function avisoFotos(txt, fixo, html){
@@ -476,15 +569,45 @@
             leitor.readAsDataURL(file);
         });
     }
+    // v7.1 — PDF: não passa pelo canvas (que devolveria uma imagem e destruiria
+    // o arquivo). Vai direto para base64, com teto de tamanho, porque PDF não
+    // pode ser comprimido no navegador.
+    const TAMANHO_MAX_PDF = 4 * 1024 * 1024;   // 4 MB de arquivo real
+    function lerArquivoBase64(file){
+        return new Promise((resolve, reject)=>{
+            const leitor = new FileReader();
+            leitor.onerror = ()=> reject(new Error('leitura'));
+            leitor.onload  = ()=> resolve(String(leitor.result).split(',')[1]);
+            leitor.readAsDataURL(file);
+        });
+    }
+
     async function anexarLocais(files){
         for(const f of Array.from(files || [])){
-            if(anexos.length >= MAX_ANEXOS){ alert('Máximo de ' + MAX_ANEXOS + ' fotos por envio.'); break; }
+            if(anexos.length >= MAX_ANEXOS){ alert('Máximo de ' + MAX_ANEXOS + ' anexos por envio.'); break; }
+            const ehPdf = (f.type === 'application/pdf') || /\.pdf$/i.test(f.name || '');
             try{
-                const b64 = await comprimirImagem(f);
-                anexos.push({
-                    id: 'L' + Date.now().toString(36) + Math.random().toString(36).slice(2,6),
-                    mimeType: 'image/jpeg', data: b64, origem: 'local'
-                });
+                if(ehPdf){
+                    // Erro CLARO se o PDF for grande demais — nunca sumir calado.
+                    if(f.size > TAMANHO_MAX_PDF){
+                        alert('O PDF "' + f.name + '" tem ' + (f.size/1048576).toFixed(1)
+                            + ' MB e o limite é 4 MB.\n\nPDF não pode ser comprimido pelo navegador. '
+                            + 'Envie só as páginas que interessam, ou fotografe a página.');
+                        continue;
+                    }
+                    const b64 = await lerArquivoBase64(f);
+                    anexos.push({
+                        id: 'L' + Date.now().toString(36) + Math.random().toString(36).slice(2,6),
+                        mimeType: 'application/pdf', data: b64, origem: 'local',
+                        nome: f.name || 'documento.pdf'
+                    });
+                } else {
+                    const b64 = await comprimirImagem(f);
+                    anexos.push({
+                        id: 'L' + Date.now().toString(36) + Math.random().toString(36).slice(2,6),
+                        mimeType: 'image/jpeg', data: b64, origem: 'local'
+                    });
+                }
             }catch(e){
                 alert('Não consegui ler "' + f.name + '". Se for HEIC (iPhone), use uma captura de tela ou mude a câmera para "Mais compatível" (JPEG).');
             }
@@ -499,8 +622,20 @@
     // "morar" no servidor por até 30 min, até alguém digitar o código).
     // NÃO precisa de BE: o código é o elo entre os dois aparelhos.
     async function gerarCodigoPonte(){
-        const locais = anexos.filter(a=>a.origem==='local');
-        if(locais.length === 0){ alert('Anexe as fotos primeiro.'); return; }
+        // v7.1: a ponte transporta SÓ fotos. O banco gratuito aceita ~1 MB por
+        // gravação e PDF não pode ser comprimido — não caberia. Em vez de o PDF
+        // sumir calado, avisamos e deixamos ele anexado aqui.
+        const locais = anexos.filter(a=>a.origem==='local' && a.mimeType!=='application/pdf');
+        const pdfsLocais = anexos.filter(a=>a.origem==='local' && a.mimeType==='application/pdf').length;
+        if(locais.length === 0){
+            alert(pdfsLocais > 0
+                ? 'A ponte por código funciona só com FOTOS. O PDF continua anexado aqui — gere o documento neste mesmo aparelho.'
+                : 'Anexe as fotos primeiro.');
+            return;
+        }
+        if(pdfsLocais > 0){
+            alert('Atenção: ' + pdfsLocais + ' PDF não vai pela ponte (só fotos). Ele continua anexado NESTE aparelho.');
+        }
         avisoFotos('⏳ Enviando ' + locais.length + ' foto(s) e gerando o código...', true);
         try{
             const resp = await fetchAPI(BASE_URL + '/api/ponte', { method:'POST',
@@ -508,7 +643,9 @@
                 body: JSON.stringify({ fotos: locais.map(a=>({ mimeType: a.mimeType, data: a.data })) }) });
             const d = await resp.json();
             if(d.ok && d.codigo){
-                anexos = anexos.filter(a=>a.origem!=='local');
+                // Tira da lista só o que REALMENTE foi para o servidor (o PDF fica).
+                const idsEnviados = locais.map(a=>a.id);
+                anexos = anexos.filter(a=>idsEnviados.indexOf(a.id) === -1);
                 renderAnexos();
                 avisoFotos('✓ ' + d.fotos + ' foto(s) guardada(s). Código (vale 30 min, uso único):'
                     + '<span class="codigo-destaque">' + d.codigo + '</span>'
@@ -826,38 +963,119 @@
         if(e.key === 'Enter'){ e.preventDefault(); tentarReabrirPeloCampo(); }
     });
 
-    async function enviarDados(){
-        const beId = document.getElementById('beId').value;
-        const mensagem = document.getElementById('mensagem').value;
-        const unidade = document.getElementById('unidade').value;
-        const modeloId = document.getElementById('modeloIA').value;
-        const sexo = document.getElementById('sexo').value;
-        const idade = document.getElementById('idade').value;
-        const btn = document.getElementById('btnEnviar');
-        const opcoes = {
-            prontuario: tipoAtual === 'prontuario',
-            alta: document.getElementById('chkAlta').checked,
-            relatorio: document.getElementById('chkRelatorio').checked,
-            correcao: document.getElementById('chkCorrecao').checked,
-            buscarFontes: document.getElementById('chkBuscar').checked,
-            compararIAs: document.getElementById('chkComparar').checked,
-            medicarUpa: document.getElementById('chkMedicarUpa').checked,
-            exameUnidade: document.getElementById('chkExameUnidade').checked,
-            exameExterno: document.getElementById('chkExameExterno').checked
-        };
-        if(!beId || !mensagem){ alert('Preencha o Número do BE e o Relato.'); return; }
+    // ============================================================
+    //  v7.1 — ENVIO EM DUAS ETAPAS
+    //  enviarDados()    = valida e ABRE a janela de confirmação (não gasta IA).
+    //  confirmarEnvio() = o médico clicou em "Confirmar e gerar".
+    //  executarEnvio()  = faz o pedido de verdade.
+    //  cancelarGeracao()= aborta o pedido em andamento.
+    //  A confirmação é SEMPRE obrigatória (decisão do projeto: não existe
+    //  "não mostrar de novo"). O que se perde em um toque, ganha-se em não
+    //  gerar no BE errado.
+    // ============================================================
+    let controleEnvio = null;    // AbortController do pedido em andamento
+    let envioCancelado = false;  // marca que foi o médico quem parou
 
-        // Fotos anexadas: vão junto do pedido (tanto as deste aparelho quanto
-        // as recebidas por código — a essa altura, todas já estão só aqui).
+    function lerCamposEnvio(){
+        return {
+            beId: document.getElementById('beId').value,
+            mensagem: document.getElementById('mensagem').value,
+            unidade: document.getElementById('unidade').value,
+            modeloId: document.getElementById('modeloIA').value,
+            sexo: document.getElementById('sexo').value,
+            idade: document.getElementById('idade').value,
+            opcoes: {
+                prontuario: tipoAtual === 'prontuario',
+                alta: document.getElementById('chkAlta').checked,
+                relatorio: document.getElementById('chkRelatorio').checked,
+                correcao: document.getElementById('chkCorrecao').checked,
+                buscarFontes: document.getElementById('chkBuscar').checked,
+                compararIAs: document.getElementById('chkComparar').checked,
+                medicarUpa: document.getElementById('chkMedicarUpa').checked,
+                exameUnidade: document.getElementById('chkExameUnidade').checked,
+                exameExterno: document.getElementById('chkExameExterno').checked
+            }
+        };
+    }
+
+    //  ETAPA 1: valida o mínimo e mostra a janela de conferência.
+    function enviarDados(){
+        const c = lerCamposEnvio();
+        if(!c.beId || !c.mensagem){ alert('Preencha o Número do BE e o Relato.'); return; }
+
+        const nomesToggles = [
+            [c.opcoes.medicarUpa,    '💉 Medicar na UPA'],
+            [c.opcoes.alta,          '🏠 Receita'],
+            [c.opcoes.relatorio,     '📋 Relatório APS'],
+            [c.opcoes.exameUnidade,  '🔬 Exame na unidade'],
+            [c.opcoes.exameExterno,  '🏥 Exame externo'],
+            [c.opcoes.buscarFontes,  '🔎 Buscar em fontes'],
+            [c.opcoes.compararIAs,   '⚖️ Comparar IAs'],
+            [c.opcoes.correcao,      '⚠️ Apenas corrigir']
+        ].filter(x=>x[0]).map(x=>x[1]);
+
+        const nFotos = anexos.filter(a=>a.mimeType!=='application/pdf').length;
+        const nPdfs  = anexos.filter(a=>a.mimeType==='application/pdf').length;
+        const partesAnexo = [];
+        if(nFotos > 0) partesAnexo.push(nFotos + (nFotos===1 ? ' foto' : ' fotos'));
+        if(nPdfs  > 0) partesAnexo.push(nPdfs  + (nPdfs===1  ? ' PDF'  : ' PDFs'));
+
+        const rotuloSexo = { M:'Masculino', F:'Feminino', O:'Outro' }[c.sexo] || (c.sexo || '—');
+        const rotuloIdade = (c.idade !== '' && c.idade !== null && c.idade !== undefined)
+            ? (c.idade + ' anos') : 'idade não informada';
+        const rotuloModelo = { flash:'Gemini Flash', pro:'Gemini Pro', claude:'Claude' }[c.modeloId] || c.modeloId;
+
+        document.getElementById('confBe').innerText      = 'BE ' + c.beId;
+        document.getElementById('confDemo').innerText    = rotuloSexo + ' · ' + rotuloIdade;
+        document.getElementById('confUnidade').innerText = (c.unidade === 'ACRIZIO') ? 'UPA Acrízio Menezes' : 'UPA Barreiro';
+        document.getElementById('confTipo').innerText    = (tipoAtual === 'evolucao') ? 'Evolução' : 'Prontuário';
+        document.getElementById('confModelo').innerText  = rotuloModelo;
+        document.getElementById('confToggles').innerText = nomesToggles.length ? nomesToggles.join(' · ') : 'nenhum';
+        document.getElementById('confAnexos').innerText  = partesAnexo.length ? partesAnexo.join(' + ') : 'nenhum';
+
+        document.getElementById('modalConfirmar').classList.add('aberto');
+    }
+
+    //  "✏️ Corrigir": fecha a janela e NÃO perde nada do que já foi digitado.
+    function fecharConfirmacao(){
+        document.getElementById('modalConfirmar').classList.remove('aberto');
+    }
+
+    //  "✅ Confirmar e gerar": fecha a janela e dispara o envio de verdade.
+    function confirmarEnvio(){
+        fecharConfirmacao();
+        executarEnvio();
+    }
+
+    //  "🛑 Cancelar geração": corta o pedido em andamento. O servidor percebe a
+    //  conexão fechar, aborta a chamada às IAs e NÃO grava nada no histórico.
+    function cancelarGeracao(){
+        if(controleEnvio){
+            envioCancelado = true;
+            controleEnvio.abort();
+        }
+    }
+
+    async function executarEnvio(){
+        const c = lerCamposEnvio();
+        const beId = c.beId, mensagem = c.mensagem, unidade = c.unidade;
+        const modeloId = c.modeloId, sexo = c.sexo, idade = c.idade, opcoes = c.opcoes;
+        const btn = document.getElementById('btnEnviar');
+
+        // Anexos: vão junto do pedido (tanto os deste aparelho quanto as fotos
+        // recebidas por código — a essa altura, todos já estão só aqui).
         const imagens = anexos.map(a=>({ mimeType: a.mimeType, data: a.data }));
 
+        controleEnvio = new AbortController();
+        envioCancelado = false;
+        document.getElementById('btnCancelar').style.display = 'block';
         btn.disabled = true;
         let txtLoading = opcoes.compararIAs
             ? '⚖️ Gerando nas duas IAs e comparando (demora um pouco mais)...'
             : (opcoes.buscarFontes
                 ? '🔎 Buscando em fontes confiáveis (pode demorar um pouco mais)...'
                 : '🧠 Processando raciocínio e documentos...');
-        if(imagens.length > 0){ txtLoading += ' 📷 Lendo ' + imagens.length + ' foto(s).'; }
+        if(imagens.length > 0){ txtLoading += ' 📎 Lendo ' + imagens.length + ' anexo(s).'; }
         document.getElementById('loading').innerText = txtLoading;
         document.getElementById('loading').style.display = 'block';
         document.getElementById('resDiscussao').innerText = 'Analisando caso...';
@@ -877,6 +1095,7 @@
             const resp = await fetchAPI(API_URL,{
                 method:'POST',
                 headers:{'Content-Type':'application/json'},
+                signal: controleEnvio.signal,
                 body: JSON.stringify({beId,mensagem,unidade,opcoes,modeloId,sexo,idade,tipoDocumento:tipoAtual,imagens})
             });
             const data = await resp.json();
@@ -913,8 +1132,20 @@
                 }
             }
         }catch(e){
-            alert('Erro de conexão com o servidor.');
+            // v7.1: distingue CANCELAMENTO de falha de rede. Cancelar não é erro
+            // — e nada foi salvo, nem aqui nem no servidor. Tudo o que estava
+            // digitado (relato, BE, sexo, idade, toggles, anexos) fica intacto.
+            if(envioCancelado || (e && e.name === 'AbortError')){
+                document.getElementById('resDiscussao').innerText =
+                    '🛑 Geração cancelada. Nada foi salvo no histórico deste BE. '
+                    + 'Seu relato e os anexos continuam aqui — corrija o que precisar e envie de novo.';
+            } else {
+                alert('Erro de conexão com o servidor.');
+            }
         }finally{
+            controleEnvio = null;
+            envioCancelado = false;
+            document.getElementById('btnCancelar').style.display = 'none';
             btn.disabled = false;
             document.getElementById('loading').style.display = 'none';
         }
