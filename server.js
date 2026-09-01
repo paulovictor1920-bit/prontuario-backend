@@ -1,5 +1,31 @@
 // ============================================================================
-//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v7.1
+//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v7.2
+//
+//  Novidades da v7.2 (31/ago/2026) — correções do campo de exames após teste
+//  em bancada. O anexo em FOTO passou a ser lido corretamente, mas a saída
+//  vinha longa e fatiada em várias linhas. Quatro frentes:
+//   1) REGRAS FECHADAS DE CONTEÚDO (prompt). Listas TAXATIVAS, não exemplos:
+//      - HEMOGRAMA: só Hb, Ht, leucócitos (com "desvio à esquerda" em palavras,
+//        sem percentuais) e plaquetas. PROIBIDO hemácias, VCM, HCM, RDW,
+//        linfócitos, monócitos, eosinófilos, bastonetes/segmentados numéricos.
+//      - EAS/URINA: só o que estiver POSITIVO/ALTERADO entre proteína, nitrito,
+//        leucócitos, hemácias/hemoglobinúria e bactérias. PROIBIDO aspecto,
+//        cor, densidade, pH, cilindros. Item negativo ou irrelevante não entra.
+//      - UMA data para TODO o laboratório; proibido repetir a data por exame.
+//   2) UNIFICAÇÃO NO SERVIDOR (trava dupla): unificarLinhasLaboratorio junta
+//      numa linha só as linhas laboratoriais que a IA tenha fatiado
+//      ("Hemograma:...", "Bioquímica:...", "EAS:..."), com UMA data. É
+//      LOSSLESS: não apaga resultado nenhum, só junta e tira data repetida e
+//      rótulo redundante. A SELEÇÃO do que entra fica no prompt de propósito —
+//      apagar valor de exame por regex é risco clínico (ex.: um "pH" apagado
+//      seria fatal numa gasometria).
+//   3) TRAVA DE REMISSÃO: "resultado conforme documento anexado", "vide anexo"
+//      e afins NÃO são resultado. O campo é zerado e a discussão recebe um
+//      AVISO EM DESTAQUE de que o anexo não foi lido. Antes isso passava e
+//      virava uma linha bonita e vazia — pior que campo vazio.
+//   4) CHECAGEM DE PDF: valida a assinatura "%PDF-" do arquivo recebido
+//      (base64 começando por "JVBERi"). PDF corrompido agora dá erro claro em
+//      vez de chegar ilegível na IA.
 //
 //  Novidades da v7.1 (31/ago/2026) — fatias 2 e 3 do roteiro v7:
 //   1) CANCELAR A GERAÇÃO EM ANDAMENTO. A tela agora pode abortar o pedido.
@@ -681,6 +707,85 @@ function limparExamesComplementares(txt) {
     return s;
 }
 
+// (1b) REMISSÃO AO ANEXO (v7.2): detecta o campo que só APONTA para o anexo
+// em vez de trazer o resultado ("resultado conforme documento anexado", "vide
+// anexo"). Isso não é resultado — e é pior que campo vazio, porque parece que
+// o exame foi conferido. Conservador: só acusa se for texto CURTO e SEM
+// nenhuma unidade de medida; assim "Laboratório (hoje, em anexo): Hb 11,2 g/dL"
+// (que TEM resultado de verdade) nunca é confundido com remissão.
+function ehRemissaoAnexo(txt) {
+    if (!txt || typeof txt !== 'string') return false;
+    const s = semAcento(txt.toLowerCase());
+    const remete = /(conforme|segundo|ver|vide|consta|disponivel|descrito|registrado)[^.]{0,30}\b(anexo|anexado|anexada|documento|laudo|arquivo|imagem|foto|pdf)\b/.test(s)
+        || /\b(exames?|resultados?)\s+(em|no|na)\s+anexo\b/.test(s)
+        || /\bem anexo\s*[:.]/.test(s);
+    if (!remete) return false;
+    // Se houver QUALQUER unidade de medida, há resultado de verdade: preserva.
+    const temUnidade = /\b(g\/dl|mg\/dl|mg\/l|meq\/l|mmol|mcg|ng\/ml|u\/l|ui\/l|mm3|mm³|\/mm|p\/campo|bpm|mmhg|%|milhoes)\b/.test(s);
+    if (temUnidade) return false;
+    return s.length <= 200;
+}
+
+// (1c) UNIFICAÇÃO DO LABORATÓRIO (v7.2) — TRAVA DUPLA do formato. A IA às vezes
+// fatia o laboratório em várias linhas ("Hemograma (hoje): ...", "Bioquímica
+// (hoje): ...", "EAS (hoje): ...") e repete a data em cada uma. Esta função
+// junta TUDO numa linha só, com UMA data.
+//
+// É DE PROPÓSITO LOSSLESS: não apaga NENHUM resultado. Só (a) junta linhas,
+// (b) remove a data repetida e (c) remove rótulos redundantes de painel
+// (Hemograma/Bioquímica/Laboratório), cujos valores já se identificam sozinhos.
+// A SELEÇÃO do que entra continua no prompt: apagar valor de exame por regex é
+// risco clínico direto (um "pH" apagado numa gasometria seria grave).
+//
+// ECG e exames de imagem NÃO são tocados: continuam em linha própria.
+const ROTULOS_LAB = /^\s*(laborat[óo]rio|labs?|exames? laboratoriais?|hemograma( completo)?|h[ée]mograma|bioqu[íi]mica|eletr[óo]litos|fun[çc][ãa]o renal|marcadores( card[íi]acos)?|coagulograma|gasometria( arterial| venosa)?|glicemia( capilar)?|eas|urina( rotina| tipo i+)?|sum[áa]rio de urina|parcial de urina|teste r[áa]pido)\b\s*/i;
+// Rótulos que NÃO acrescentam informação (os valores falam por si) e podem sair
+// ao juntar. Os demais (EAS, gasometria, teste rápido) são PRESERVADOS.
+const ROTULOS_LAB_REDUNDANTES = /^\s*(laborat[óo]rio|labs?|exames? laboratoriais?|hemograma( completo)?|h[ée]mograma|bioqu[íi]mica|eletr[óo]litos|fun[çc][ãa]o renal)\b\s*/i;
+
+function unificarLinhasLaboratorio(txt) {
+    if (!txt || typeof txt !== 'string') return txt;
+    const linhas = txt.split('\n').map(l => l.trim()).filter(Boolean);
+    if (linhas.length <= 1) return txt;
+
+    const laboratoriais = [];
+    const outras = [];
+    let posicaoPrimeiroLab = -1;
+    let dataComum = '';
+
+    linhas.forEach(linha => {
+        if (!ROTULOS_LAB.test(linha)) { outras.push(linha); return; }
+        if (posicaoPrimeiroLab === -1) posicaoPrimeiroLab = outras.length;
+        let corpo = linha;
+        // Guarda a PRIMEIRA data encontrada; remove as demais (repetidas).
+        const comData = corpo.match(/^([^(]*)\(([^)]*)\)\s*:?\s*(.*)$/);
+        if (comData) {
+            if (!dataComum) dataComum = comData[2].trim();
+            const rotulo = comData[1].replace(/[\s:_-]+$/, '').trim();
+            corpo = (rotulo ? rotulo + ': ' : '') + comData[3].trim();
+            corpo = corpo.replace(/\s+/g, ' ').trim();
+        }
+        corpo = corpo.replace(/^\s*:\s*/, '');
+        // Rótulo redundante sai; rótulo informativo (EAS, gasometria...) fica.
+        if (ROTULOS_LAB_REDUNDANTES.test(corpo)) {
+            corpo = corpo.replace(ROTULOS_LAB_REDUNDANTES, '').replace(/^\s*:\s*/, '').trim();
+        } else {
+            corpo = corpo.replace(/^([^:]{1,28}):\s*/, (m, rot) => rot.trim() + ': ');
+        }
+        corpo = corpo.replace(/[.;]\s*$/, '').trim();
+        if (corpo) laboratoriais.push(corpo);
+    });
+
+    if (laboratoriais.length === 0) return txt;
+    let linhaLab = 'Laboratório' + (dataComum ? ' (' + dataComum + ')' : '') + ': '
+        + laboratoriais.join(' | ') + '.';
+    linhaLab = linhaLab.replace(/\s*\|\s*/g, ' | ').replace(/(?: \| ){2,}/g, ' | ');
+
+    const saida = outras.slice();
+    saida.splice(posicaoPrimeiroLab === -1 ? saida.length : posicaoPrimeiroLab, 0, linhaLab);
+    return saida.join('\n');
+}
+
 // (2) LEMBRETE DE DATA: o Paulo pediu que TODO exame venha com a data (ou o
 // momento: "na admissão", "hoje 14h"). Esta função NÃO inventa nem altera nada
 // — só detecta a AUSÊNCIA total de referência temporal para o servidor
@@ -1122,6 +1227,20 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
         if (fotos.some(f => TIPOS_PDF.includes(f.mimeType) && f.data.length > TAMANHO_MAX_PDF)) {
             return res.status(400).json({ erro: 'Um dos PDFs passa de ~4 MB. PDF não pode ser comprimido pelo navegador: envie só as páginas necessárias, ou fotografe a página que interessa.' });
         }
+        // v7.2 — CHECAGEM DE ASSINATURA. Todo PDF começa com os bytes "%PDF-",
+        // que em base64 viram "JVBERi". Se não começar assim, o que chegou não
+        // é um PDF íntegro — e mandar isso para a IA gera exatamente o pior
+        // resultado possível: ela responde sem ter lido nada.
+        const pdfQuebrado = fotos.find(f => TIPOS_PDF.includes(f.mimeType)
+            && f.data.slice(0, 6) !== 'JVBERi');
+        if (pdfQuebrado) {
+            console.error('PDF com assinatura inválida. Início do base64:', String(pdfQuebrado.data).slice(0, 24));
+            return res.status(400).json({ erro: 'O PDF chegou corrompido (não tem a assinatura de um PDF válido). Tente anexar de novo, ou tire um print da página e anexe como foto.' });
+        }
+        // Diagnóstico no log do Render (não expõe conteúdo clínico).
+        fotos.filter(f => TIPOS_PDF.includes(f.mimeType)).forEach((f, i) => {
+            console.log('PDF #' + (i + 1) + ' recebido: ' + Math.round(f.data.length / 1024) + ' KB em base64, assinatura OK.');
+        });
         if (unidade !== 'ACRIZIO' && unidade !== 'BARREIRO') {
             return res.status(400).json({ erro: 'Unidade inválida.' });
         }
@@ -1411,6 +1530,13 @@ INSTRUÇÕES DE CADA CAMPO:
    "arredonde" um resultado, valor, unidade ou laudo que o médico não informou
    e que não esteja legível no anexo. Valor ilegível vira "[ilegível]" e você
    avisa na "discussao". Transcreva números e unidades EXATAMENTE como estão.
+   PROIBIDO REMETER AO ANEXO: é TERMINANTEMENTE PROIBIDO preencher este campo
+   com frases como "resultado conforme documento anexado", "vide anexo",
+   "exame em anexo", "ver laudo". Só existem DUAS saídas legítimas: ou você
+   transcreve os valores que conseguiu ler, ou deixa o campo VAZIO ("") e
+   escreve na "discussao" que NÃO conseguiu ler o anexo. Uma linha que apenas
+   aponta para o anexo é pior que campo vazio: dá a impressão de que o exame
+   foi conferido quando não foi.
    DATA OBRIGATÓRIA: todo exame vem com a DATA ou o momento em que foi feito,
    entre parênteses, logo após o nome do exame — usando a referência que o
    médico deu ("na admissão", "hoje 14h", "31/08"). Se ele não informou data
@@ -1418,28 +1544,58 @@ INSTRUÇÕES DE CADA CAMPO:
    "discussao" que a data do exame não foi informada.
    FORMATO — REGRA CENTRAL: SEJA CURTO. Este campo é um resumo objetivo, não a
    transcrição do laudo.
-   (a) TODOS OS EXAMES LABORATORIAIS VÃO NUMA ÚNICA LINHA, juntos, começando por
-       "Laboratório (data/momento):" e separados por " | ". NÃO crie uma linha
-       para hemograma, outra para PCR, outra para creatinina, outra para
-       eletrólitos — isso é PROIBIDO; é tudo uma linha só. Entram nessa linha
-       também gasometria, glicemia capilar e testes rápidos.
-       Mantenha juntos os valores do MESMO exame (ex.: Hb e Ht lado a lado, não
-       um no começo e outro no fim da linha).
+   (a) TODO O LABORATÓRIO VAI NUMA ÚNICA LINHA, com UMA ÚNICA DATA no começo:
+       "Laboratório (data/momento): ...", itens separados por " | ".
+       É PROIBIDO criar uma linha para hemograma, outra para bioquímica, outra
+       para EAS, outra para eletrólitos. É PROIBIDO repetir a data em cada
+       exame — a data aparece UMA vez, no começo da linha. Entram nessa mesma
+       linha: hemograma, bioquímica, eletrólitos, função renal, marcadores,
+       coagulograma, EAS/urina, gasometria, glicemia capilar e testes rápidos.
+       Mantenha juntos os valores do MESMO exame.
    (b) ECG vai em LINHA PRÓPRIA.
    (c) Cada exame de IMAGEM ou gráfico (raio-X, USG, TC, ecocardiograma) vai em
        LINHA PRÓPRIA, com a conclusão em uma frase.
-   SELEÇÃO DO QUE ENTRA (importante): NÃO despeje o laudo inteiro. Escolha os
-   resultados PRINCIPAIS de cada exame, mais qualquer valor MUITO ALTERADO que
-   chame atenção clinicamente. Exemplos do que basta: de um hemograma, hemoglobina,
-   leucócitos (com desvio, se houver) e plaquetas; de um exame de urina, os
-   achados relevantes (leucocitúria, nitrito, hematúria), não a tabela toda.
-   Use seu julgamento clínico para o que é relevante ao caso — mas o padrão é
-   ENXUTO, e nunca liste um parâmetro só para preencher espaço.
+
+   SELEÇÃO DO QUE ENTRA — AS LISTAS ABAIXO SÃO TAXATIVAS, NÃO SÃO EXEMPLOS.
+   O que não estiver na lista NÃO ENTRA, mesmo que esteja no laudo, mesmo que
+   esteja alterado, mesmo que pareça relevante. Este campo é um resumo de
+   trabalho, não a transcrição do laudo.
+
+   • HEMOGRAMA — entram SOMENTE: hemoglobina (Hb), hematócrito (Ht),
+     leucócitos totais e plaquetas. Se houver desvio à esquerda, acrescente as
+     PALAVRAS "com desvio à esquerda" logo após o número de leucócitos, SEM
+     percentuais e SEM valores absolutos.
+     PROIBIDO escrever: hemácias, VCM, HCM, CHCM, RDW, linfócitos, monócitos,
+     eosinófilos, basófilos, e os números de bastonetes ou segmentados.
+     Certo:  "Hb 11,2 | Ht 34% | leucócitos 17.400 com desvio à esquerda | plaquetas 212.000"
+     ERRADO: "Hb 11,2, Ht 34,1%, hemácias 3,88 milhões, VCM 87,9, HCM 28,9, RDW 13,8%,
+              leucócitos 17.400 (bastonetes 9%/1.566, segmentados 78%/13.572), linfócitos 10%..."
+
+   • EAS / URINA ROTINA — entram SOMENTE se estiverem POSITIVOS ou ALTERADOS:
+     proteína, nitrito, leucócitos, hemácias (ou hemoglobinúria) e bactérias.
+     Item NEGATIVO, ausente ou de alteração mínima NÃO ENTRA — nem para dizer
+     que é negativo. Se nada estiver alterado, o EAS inteiro não aparece.
+     PROIBIDO escrever, em qualquer circunstância: aspecto, cor, densidade,
+     pH, cilindros, corpos cetônicos, urobilinogênio, células epiteliais,
+     cristais, muco.
+     Certo:  "EAS: nitrito positivo | leucócitos 85/campo | hemácias 12/campo | bactérias aumentadas"
+     ERRADO: "EAS: aspecto turvo, densidade 1.022, pH 6,5, proteínas traços, nitrito
+              POSITIVO, esterase +++, leucócitos 85/campo, cilindros presentes..."
+
+   • DEMAIS EXAMES (bioquímica, eletrólitos, marcadores, gasometria): só os
+     valores que importam para ESTE caso. Nunca um painel inteiro por hábito.
+
+   • CULTURAS E EXAMES PENDENTES (urocultura, hemocultura, sorologia em
+     andamento) NÃO são resultado. Se valer citar, vão numa menção CURTA no
+     fim da linha do laboratório (ex.: "| uro e hemoculturas coletadas") —
+     nunca uma linha para cada, nunca com prazo de liberação.
+
    NUNCA escreva VALORES DE REFERÊNCIA (nada de "(VR: 12–16)"). Unidades só
-   quando forem necessárias para não gerar ambiguidade.
-   MODELO:
+   quando forem necessárias para não gerar ambiguidade — dispense-as nos itens
+   em que a unidade é óbvia.
+   MODELO (repare: UMA linha de laboratório, UMA data, itens enxutos):
    "ECG (admissão, 31/08 09:20): ritmo sinusal, FC 78 bpm, sem alterações isquêmicas agudas.
-Laboratório (31/08): Hb 12,4 | Ht 37% | leucócitos 9.800 sem desvio | plaquetas 210.000 | PCR 48 | creatinina 1,1 | Na 138 | K 4,2.
+Laboratório (31/08 09:40): Hb 11,2 | Ht 34% | leucócitos 17.400 com desvio à esquerda | plaquetas 212.000 | PCR 148,6 | ureia 48 | creatinina 1,32 | Na 136 | K 3,9 | EAS: nitrito positivo, leucócitos 85/campo, hemácias 12/campo, bactérias aumentadas | uro e hemoculturas coletadas.
 Raio-X de tórax (31/08): sem consolidações ou derrame pleural."
    Linguagem DESCRITIVA E ASSERTIVA, como os demais campos do prontuário: se
    houver dúvida de interpretação, ela vai na "discussao", nunca aqui.
@@ -1614,7 +1770,18 @@ ${mensagem}`;
             // --- EXAMES COMPLEMENTARES (v7) ---
             // Trava: só existe se tiver conteúdo real (nada de rótulo vazio nem
             // de "não foram realizados"). NÃO depende de toggle nenhum.
+            // v7.2 — TRAVA DE REMISSÃO: campo que só aponta para o anexo não é
+            // resultado. Zera e AVISA que o anexo não foi lido (silêncio aqui é
+            // pior: parece que o exame foi conferido quando não foi).
+            if (ehRemissaoAnexo(dados.exames_complementares)) {
+                dados.exames_complementares = '';
+                dados.discussao = (dados.discussao || '')
+                    + '\n\n🚫 O ANEXO NÃO FOI LIDO. A IA não conseguiu extrair o conteúdo do arquivo e devolveu apenas uma remissão ("conforme anexo"), que foi descartada. NENHUM resultado de exame foi transcrito — confira o anexo você mesmo e, se precisar, digite os valores no relato.';
+            }
             dados.exames_complementares = limparExamesComplementares(dados.exames_complementares);
+            // v7.2 — TRAVA DUPLA DE FORMATO: junta o laboratório fatiado numa
+            // linha só, com uma data. Lossless (não apaga resultado nenhum).
+            dados.exames_complementares = unificarLinhasLaboratorio(dados.exames_complementares);
             if (dados.exames_complementares) {
                 // Lembrete de data (não altera o conteúdo; só avisa na discussão).
                 if (examesSemReferenciaDeData(dados.exames_complementares)) {
@@ -1629,207 +1796,4 @@ ${mensagem}`;
                 }
             }
 
-            // --- TRAVAS DE SEGURANÇA (servidor manda, não a IA) ---
-            if (!op.relatorio) dados.relatorio = '';
-            if (!exameUnidade) dados.exame_unidade = '';
-            if (!exameExterno) dados.exame_externo = '';
-            if (typeof dados.exame_unidade !== 'string') dados.exame_unidade = '';
-            if (typeof dados.exame_externo !== 'string') dados.exame_externo = '';
-
-            // --- Rede de segurança farmacológica ---
-            const textoConferir = [dados.prescricao_interna, dados.receita].filter(Boolean).join('\n');
-            const alertas = conferirMedicamentos(textoConferir, listaUnidade);
-            if (alertas.length > 0) {
-                const aviso = '\n\n⚠️ LEMBRETE (verificação grosseira — NÃO confiável; confira você mesmo na padronização): possíveis itens fora da lista desta unidade:\n- '
-                    + alertas.join('\n- ');
-                dados.discussao = (dados.discussao || '') + aviso;
-            }
-
-            // --- Diluições ---
-            // BARREIRO: bloco separado (como sempre foi).
-            // ACRÍZIO (v6): diluição NA MESMA LINHA da prescrição interna
-            //   (exigência nova da unidade); o campo diluicoes fica vazio.
-            dados.diluicoes = '';
-            if (unidade === 'BARREIRO') {
-                const dil = montarDiluicoes(dados.prescricao_interna);
-                dados.diluicoes = dil.blocoSeparado;
-                if (dil.naoEncontrados.length > 0) {
-                    const aviso = '\n\n💧 DILUIÇÃO NÃO ENCONTRADA na tabela de referência (consultar manualmente):\n- '
-                        + dil.naoEncontrados.join('\n- ');
-                    dados.discussao = (dados.discussao || '') + aviso;
-                }
-            } else if (unidade === 'ACRIZIO') {
-                const dil = anexarDiluicaoInline(dados.prescricao_interna);
-                dados.prescricao_interna = dil.texto;
-                if (dil.naoEncontrados.length > 0) {
-                    const aviso = '\n\n💧 DILUIÇÃO NÃO ENCONTRADA na tabela de referência (consultar manualmente):\n- '
-                        + dil.naoEncontrados.join('\n- ');
-                    dados.discussao = (dados.discussao || '') + aviso;
-                }
-            }
-
-            // --- Fontes citadas: anexa o link ao fim da discussão ---
-            if (dados.fontes && dados.fontes.trim()) {
-                dados.discussao = (dados.discussao || '')
-                    + '\n\n📚 FONTES CONSULTADAS:\n' + dados.fontes.trim();
-            }
-            return dados;
-        }
-
-        const erroJsonInvalido = () => res.status(502).json({
-            erro: 'A IA devolveu resposta incompleta. Tente enviar de novo' +
-                  (usarBusca ? ' (a busca em fontes às vezes alonga a resposta; tente sem ela se persistir).' : '.')
-        });
-
-        // ==============================================================
-        //  MODO COMPARAÇÃO: gera nas DUAS IAs (Gemini Pro + Claude) e pede
-        //  ao Claude um resumo clínico das diferenças. NÃO salva no
-        //  histórico (você ainda vai escolher qual versão fica).
-        // ==============================================================
-        if (compararIAs) {
-            if (!process.env.ANTHROPIC_API_KEY) {
-                return res.status(400).json({ erro: 'A comparação precisa da chave do Claude (ANTHROPIC_API_KEY) configurada no Render.' });
-            }
-            let textoGemini, textoClaude;
-            try {
-                // Gera as duas em paralelo para não somar os tempos de espera.
-                [textoGemini, textoClaude] = await Promise.all([
-                    chamarGemini(promptFinal, 'pro', usarBusca, fotos, abortador.signal),
-                    chamarClaude(promptFinal, fotos, abortador.signal)
-                ]);
-            } catch (e) {
-                // v7.1: se foi o médico que cancelou, sai calado — não há para
-                // quem responder e nada foi salvo (a comparação nunca salva).
-                if (clienteSaiu || ehAborto(e, abortador.signal)) {
-                    console.log('Comparação cancelada pelo médico (BE ' + beId + ').');
-                    return;
-                }
-                console.error('Erro na geração comparativa:', e.message);
-                return res.status(502).json({ erro: 'Não foi possível gerar as duas versões para comparar. Tente novamente.' });
-            }
-            if (clienteSaiu) {
-                console.log('Comparação descartada: o médico cancelou antes do fim (BE ' + beId + ').');
-                return;
-            }
-            const dadosGemini = posProcessar(extrairJson(textoGemini));
-            const dadosClaude = posProcessar(extrairJson(textoClaude));
-            if (!dadosGemini || !dadosClaude) return erroJsonInvalido();
-
-            // Pede ao Claude (leitura neutra) um resumo das diferenças clínicas.
-            let resumoDiferencas = '';
-            try {
-                const promptComparar = `Você é um médico revisor. Abaixo estão DUAS versões de documentação clínica geradas por IAs diferentes (A e B) para o MESMO caso. Compare-as e escreva um resumo OBJETIVO em português das DIFERENÇAS CLINICAMENTE RELEVANTES, cobrindo: hipótese diagnóstica, conduta, medicação/prescrição, CID e quaisquer red flags que uma citou e a outra não. Seja conciso (tópicos curtos com hífen). Se forem praticamente equivalentes, diga isso. Onde houver divergência de conduta ou medicação, destaque, pois é onde mora o risco. NÃO reescreva os documentos; só aponte as diferenças. Responda em TEXTO simples (não JSON).
-
-VERSÃO A (Gemini):
-${JSON.stringify(dadosGemini)}
-
-VERSÃO B (Claude):
-${JSON.stringify(dadosClaude)}`;
-                const respCmp = await fetch('https://api.anthropic.com/v1/messages', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'x-api-key': process.env.ANTHROPIC_API_KEY,
-                        'anthropic-version': '2023-06-01'
-                    },
-                    body: JSON.stringify({
-                        model: MODELO_CLAUDE,
-                        max_tokens: 2048,
-                        messages: [{ role: 'user', content: promptComparar }]
-                    })
-                });
-                if (respCmp.ok) {
-                    const d = await respCmp.json();
-                    resumoDiferencas = (d.content || []).map(b => b.type === 'text' ? b.text : '').filter(Boolean).join('\n');
-                }
-            } catch (e) {
-                console.error('Erro ao resumir diferenças:', e.message);
-            }
-            if (!resumoDiferencas) {
-                resumoDiferencas = 'Não foi possível gerar o resumo automático das diferenças. Compare as duas versões manualmente antes de escolher.';
-            }
-
-            // Devolve as DUAS versões + o resumo. A escolha (e o salvamento) é
-            // feita depois, pela tela, na rota /api/escolher.
-            return res.json({
-                _comparacao: true,
-                resumoDiferencas,
-                versaoGemini: dadosGemini,
-                versaoClaude: dadosClaude
-            });
-        }
-
-        // ==============================================================
-        //  MODO NORMAL: uma IA só (com fallback automático se for Gemini).
-        // ==============================================================
-        let saida;
-        try {
-            saida = await gerarComFallback(promptFinal, modeloId, usarBusca, fotos, abortador.signal);
-        } catch (error) {
-            // v7.1: cancelamento não é erro. Sai calado, sem gravar nada.
-            if (clienteSaiu || ehAborto(error, abortador.signal)) {
-                console.log('Geração cancelada pelo médico (BE ' + beId + ') — nada gravado no histórico.');
-                return;
-            }
-            console.error('Erro ao gerar com a IA:', error.message);
-            return res.status(502).json({ erro: 'A IA está indisponível no momento. Tente novamente em instantes ou troque o modelo (Flash / Pro / Claude).' });
-        }
-
-        // v7.1: TRAVA DO CANCELAMENTO. Mesmo que a IA tenha terminado a tempo,
-        // se o médico já cancelou, o resultado é DESCARTADO e NADA é gravado —
-        // é isto que impede uma "etapa fantasma" no BE.
-        if (clienteSaiu) {
-            console.log('Resposta descartada: o médico cancelou antes do fim (BE ' + beId + ') — nada gravado no histórico.');
-            return;
-        }
-
-        let dados = posProcessar(saida.dados);
-        if (!dados) {
-            console.error('IA devolveu JSON inválido.');
-            return erroJsonInvalido();
-        }
-
-        // Marca qual motor respondeu (e se foi fallback) para a tela avisar.
-        dados._motorUsado = saida.motorUsado;
-        dados._caiuParaClaude = saida.caiuParaClaude;
-
-        // Salva no histórico (guarda também sexo/idade/tipo p/ reabrir o caso).
-        // IMPORTANTE: as fotos em si NÃO entram aqui — só a CONTAGEM, para
-        // registro. O conteúdo clínico extraído já está dentro de "resposta".
-        const quando = Date.now();
-        historicoPaciente.push({
-            medico: mensagem, comandos: op, resposta: dados,
-            sexo: sexo || '', idade: (idade !== undefined ? idade : ''),
-            tipo: ehEvolucao ? 'evolucao' : 'prontuario',
-            fotos: fotos.length,
-            quando: quando
-        });
-        const salvou = await salvarHistorico(beId, historicoPaciente, sexo, idade, quando);
-        dados._historicoSalvo = salvou;
-
-        res.json(dados);
-
-    } catch (error) {
-        console.error('Erro no processamento:', error);
-        res.status(500).json({ erro: 'Falha no processamento. Tente novamente.' });
-    }
-});
-
-// ----------------------------------------------------------------------------
-//  ROTA: salvar a versão ESCOLHIDA após uma comparação.
-//  A comparação NÃO salva sozinha; depois que o médico escolhe (Gemini ou
-//  Claude), a tela manda a versão escolhida para cá, que então empilha no
-//  histórico do BE — exatamente como um atendimento normal faria.
-// ----------------------------------------------------------------------------
-app.post('/api/escolher', limitarAbuso, async (req, res) => {
-    try {
-        const { beId, mensagem, opcoes, sexo, idade, tipoDocumento, resposta, motorEscolhido } = req.body;
-        if (!beId || !resposta) {
-            return res.status(400).json({ erro: 'Faltam dados para salvar a versão escolhida.' });
-        }
-        const op = opcoes || {};
-        const ehEvolucao = tipoDocumento === 'evolucao';
-        const dados = resposta;
-        dados._motorUsado = motorEscolhido || 'desconhecido';
-
-        const historicoPaciente 
+           
