@@ -1,5 +1,27 @@
 // ============================================================================
-//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v7
+//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v7.1
+//
+//  Novidades da v7.1 (31/ago/2026) — fatias 2 e 3 do roteiro v7:
+//   1) CANCELAR A GERAÇÃO EM ANDAMENTO. A tela agora pode abortar o pedido.
+//      Do lado do servidor isso NÃO bastava: abortar o navegador não cancela
+//      a chamada que o Render já fez ao Gemini/Claude. Agora a rota
+//      /api/atendimento escuta req.on('close') e, se o cliente sumir antes da
+//      resposta, (a) aborta a chamada de SAÍDA às IAs (AbortController
+//      repassado a chamarGemini/chamarClaude) e (b) NÃO grava nada no Redis.
+//      Nunca existe "etapa fantasma" no histórico do BE.
+//      OBS de segurança: um aborto NUNCA aciona o fallback para o Claude
+//      (ehAborto), senão cancelar dispararia uma segunda chamada paga.
+//   2) ANEXO DE PDF (antes só imagem). O PDF era DESCARTADO EM SILÊNCIO pelo
+//      filtro de tipos — o pior dos mundos. Agora:
+//      - application/pdf é aceito, com teto próprio de tamanho (~4 MB), pois
+//        PDF não passa pela compressão do navegador;
+//      - anexo de tipo não suportado agora dá ERRO CLARO, não some calado;
+//      - o Gemini lê PDF pelo mesmo inlineData; o CLAUDE exige um bloco
+//        DIFERENTE do de imagem ("document"), montado conforme o mimeType;
+//      - a PONTE por código continua SÓ para fotos (limite de ~1 MB por
+//        gravação do Upstash), agora com mensagem explicando isso.
+//      Nada muda nas regras clínicas de leitura de anexo: transcrição fiel,
+//      proibido chutar valor ilegível, omitir identificadores.
 //
 //  Novidades da v7 (31/ago/2026) — duas frentes (fatia 1 do roteiro v7):
 //   1) CAMPO NOVO "exames_complementares" (Exames Prévios Realizados): lugar
@@ -295,8 +317,17 @@ async function salvarHistorico(beId, pilha, sexo, idade, quando) {
 const TEMPO_FOTO = 1800;                    // 30 minutos, em segundos
 const MAX_FOTOS_POR_CODIGO = 9;             // máximo de fotos por código
 const TIPOS_IMAGEM = ['image/jpeg', 'image/png', 'image/webp'];
+//  v7.1: PDF passou a ser aceito COMO ANEXO DIRETO (não pela ponte). Fica numa
+//  lista separada porque o caminho dele é diferente em três pontos: não é
+//  comprimido pela tela, tem teto próprio de tamanho e, no Claude, vira um
+//  bloco "document" em vez de "image".
+const TIPOS_PDF = ['application/pdf'];
+const TIPOS_ACEITOS = TIPOS_IMAGEM.concat(TIPOS_PDF);
 const TAMANHO_MAX_FOTO_PONTE = 1000 * 1024; // ~1 MB em base64 por foto (a tela comprime para <=950 KB; cabe na gravação de 1 MB do Upstash)
 const TAMANHO_MAX_FOTO = 2 * 1024 * 1024;   // limite por foto anexada num atendimento
+//  PDF não é comprimido: teto de ~4 MB de arquivo real. Em base64 o texto fica
+//  ~1,37x maior, por isso o número aqui é maior que 4 MB.
+const TAMANHO_MAX_PDF = 5.6 * 1024 * 1024;
 
 //  Gera um código de 4 números que ainda não esteja em uso e já cria o índice
 //  vazio (com validade de 30 min). Devolve o código ou null se não conseguir.
@@ -912,7 +943,7 @@ function extrairJson(txt) {
 //  Chama o Gemini. 'modeloId' = 'flash' ou 'pro'. 'usarBusca' liga a busca web.
 //  'imagens' (opcional) = fotos de documentos anexadas pela tela; o Gemini lê
 //  imagens nativamente (vão como "inlineData" junto do texto do prompt).
-async function chamarGemini(promptFinal, modeloId, usarBusca, imagens) {
+async function chamarGemini(promptFinal, modeloId, usarBusca, imagens, sinal) {
     const modelToUse = modeloId === 'flash' ? MODELO_RAPIDO : MODELO_PROFUNDO;
     const configModelo = { model: modelToUse };
     if (usarBusca) {
@@ -923,15 +954,30 @@ async function chamarGemini(promptFinal, modeloId, usarBusca, imagens) {
     if (!usarBusca) {
         generationConfig.responseMimeType = 'application/json';
     }
+    // O Gemini lê imagem E PDF pelo mesmo "inlineData" — basta o mimeType certo.
     const parts = [{ text: promptFinal }];
     (imagens || []).forEach(img => {
         parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
     });
+    // v7.1: 'sinal' permite cortar a chamada quando o médico cancela.
+    const opcoesPedido = sinal ? { signal: sinal } : undefined;
     const result = await model.generateContent({
         contents: [{ role: 'user', parts }],
         generationConfig
-    });
+    }, opcoesPedido);
     return result.response.text();
+}
+
+//  v7.1: detecta se o erro veio de um CANCELAMENTO (o médico clicou em
+//  "Cancelar geração" e o navegador fechou a conexão). Precisa ser tratado
+//  ANTES do fallback: sem isso, cancelar o Gemini dispararia uma chamada nova
+//  (e paga) ao Claude — exatamente o oposto do que se quer.
+function ehAborto(error, sinal) {
+    if (sinal && sinal.aborted) return true;
+    if (!error) return false;
+    const nome = error.name || '';
+    const msg = error.message || String(error);
+    return nome === 'AbortError' || /abort/i.test(msg);
 }
 
 //  Detecta se um erro do Gemini é "sobrecarga / indisponível" (vale tentar o
@@ -948,20 +994,31 @@ function ehFalhaTemporariaGemini(error) {
 //  é usado, ela não se aplica — pedimos só o JSON com o conhecimento do modelo.
 //  'imagens' (opcional) = fotos de documentos; o Claude também lê imagens
 //  nativamente (vão como blocos "image" antes do texto do prompt).
-async function chamarClaude(promptFinal, imagens) {
+async function chamarClaude(promptFinal, imagens, sinal) {
     if (!process.env.ANTHROPIC_API_KEY) {
         throw new Error('ANTHROPIC_API_KEY não configurada no Render.');
     }
     let conteudo = promptFinal;
     if (imagens && imagens.length > 0) {
-        conteudo = imagens.map(img => ({
-            type: 'image',
-            source: { type: 'base64', media_type: img.mimeType, data: img.data }
-        }));
+        // v7.1: o Claude NÃO usa o mesmo bloco para os dois formatos. Imagem vai
+        // como "image"; PDF vai como "document". Mandar PDF dentro de um bloco
+        // de imagem faz a chamada inteira falhar.
+        conteudo = imagens.map(img => (
+            TIPOS_PDF.includes(img.mimeType)
+                ? {
+                    type: 'document',
+                    source: { type: 'base64', media_type: 'application/pdf', data: img.data }
+                }
+                : {
+                    type: 'image',
+                    source: { type: 'base64', media_type: img.mimeType, data: img.data }
+                }
+        ));
         conteudo.push({ type: 'text', text: promptFinal });
     }
     const resp = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
+        signal: sinal,
         headers: {
             'Content-Type': 'application/json',
             'x-api-key': process.env.ANTHROPIC_API_KEY,
@@ -995,20 +1052,24 @@ async function chamarClaude(promptFinal, imagens) {
 //   - modeloId 'claude'        -> chama o Claude direto.
 //   - modeloId 'flash' / 'pro' -> chama o Gemini; se ele cair por sobrecarga,
 //                                 tenta o Claude automaticamente.
-async function gerarComFallback(promptFinal, modeloId, usarBusca, imagens) {
+async function gerarComFallback(promptFinal, modeloId, usarBusca, imagens, sinal) {
     if (modeloId === 'claude') {
-        const txt = await chamarClaude(promptFinal, imagens);
+        const txt = await chamarClaude(promptFinal, imagens, sinal);
         return { dados: extrairJson(txt), motorUsado: 'claude', caiuParaClaude: false };
     }
     try {
-        const txt = await chamarGemini(promptFinal, modeloId, usarBusca, imagens);
+        const txt = await chamarGemini(promptFinal, modeloId, usarBusca, imagens, sinal);
         return { dados: extrairJson(txt), motorUsado: 'gemini', caiuParaClaude: false };
     } catch (error) {
+        // v7.1: CANCELAMENTO vem antes de tudo. Se o médico cancelou, o erro do
+        // Gemini é um aborto — e aborto NÃO é sobrecarga. Sem esta guarda, o
+        // cancelamento dispararia uma chamada nova (e paga) ao Claude.
+        if (ehAborto(error, sinal)) throw error;
         // Só cai pro Claude se: (a) for falha temporária do Gemini E (b) houver
         // chave da Anthropic configurada. Senão, repassa o erro original.
         if (ehFalhaTemporariaGemini(error) && process.env.ANTHROPIC_API_KEY) {
             console.error('Gemini falhou (sobrecarga); tentando Claude. Detalhe:', error.message);
-            const txt = await chamarClaude(promptFinal, imagens);
+            const txt = await chamarClaude(promptFinal, imagens, sinal);
             return { dados: extrairJson(txt), motorUsado: 'claude', caiuParaClaude: true };
         }
         throw error;
@@ -1019,6 +1080,22 @@ async function gerarComFallback(promptFinal, modeloId, usarBusca, imagens) {
 //  ROTA PRINCIPAL
 // ----------------------------------------------------------------------------
 app.post('/api/atendimento', limitarAbuso, async (req, res) => {
+    // ------------------------------------------------------------------
+    //  v7.1 — CANCELAMENTO. Se o médico clicar em "Cancelar geração", o
+    //  navegador fecha a conexão. Isso, sozinho, NÃO cancela a chamada que o
+    //  Render já fez ao Gemini/Claude — por isso guardamos um AbortController
+    //  e o repassamos às IAs. E, principalmente: com 'clienteSaiu' ligado,
+    //  NADA é gravado no Redis (nunca uma etapa fantasma no BE).
+    // ------------------------------------------------------------------
+    const abortador = new AbortController();
+    let clienteSaiu = false;
+    req.on('close', () => {
+        if (!res.writableEnded) {
+            clienteSaiu = true;
+            try { abortador.abort(); } catch (e) {}
+        }
+    });
+
     try {
         const { beId, mensagem, unidade, opcoes, modeloId, sexo, idade, tipoDocumento, imagens } = req.body;
 
@@ -1026,17 +1103,24 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
             return res.status(400).json({ erro: 'Número do BE e relato são obrigatórios.' });
         }
 
-        // FOTOS DE DOCUMENTOS anexadas pela tela (exames, prontuários antigos,
-        // evoluções). Validação: só imagens, no máximo 9, cada uma até ~1 MB
-        // (a tela já comprime antes de enviar). As fotos NUNCA são gravadas no
-        // histórico — só o texto gerado a partir delas.
+        // ANEXOS DE DOCUMENTOS enviados pela tela (exames, prontuários antigos,
+        // evoluções): fotos e — desde a v7.1 — PDFs. Máximo de 9. As fotos já
+        // chegam comprimidas pela tela; o PDF vem inteiro e tem teto próprio.
+        // NADA disso é gravado no histórico — só o texto gerado a partir dele.
         let fotos = Array.isArray(imagens) ? imagens : [];
-        fotos = fotos
-            .filter(f => f && typeof f.data === 'string' && f.data.length > 0)
-            .filter(f => TIPOS_IMAGEM.includes(f.mimeType))
-            .slice(0, MAX_FOTOS_POR_CODIGO);
-        if (fotos.some(f => f.data.length > TAMANHO_MAX_FOTO)) {
+        fotos = fotos.filter(f => f && typeof f.data === 'string' && f.data.length > 0);
+        // v7.1: tipo não suportado agora dá ERRO CLARO. Antes era descartado em
+        // silêncio — o médico achava que a IA tinha lido o anexo, e não tinha.
+        const naoSuportado = fotos.find(f => !TIPOS_ACEITOS.includes(f.mimeType));
+        if (naoSuportado) {
+            return res.status(400).json({ erro: 'Anexo em formato não suportado (' + (naoSuportado.mimeType || 'desconhecido') + '). Aceito: foto JPEG/PNG/WEBP ou arquivo PDF.' });
+        }
+        fotos = fotos.slice(0, MAX_FOTOS_POR_CODIGO);
+        if (fotos.some(f => TIPOS_IMAGEM.includes(f.mimeType) && f.data.length > TAMANHO_MAX_FOTO)) {
             return res.status(400).json({ erro: 'Uma das fotos ficou grande demais mesmo após a compressão. Fotografe de novo, de mais perto ou por partes.' });
+        }
+        if (fotos.some(f => TIPOS_PDF.includes(f.mimeType) && f.data.length > TAMANHO_MAX_PDF)) {
+            return res.status(400).json({ erro: 'Um dos PDFs passa de ~4 MB. PDF não pode ser comprimido pelo navegador: envie só as páginas necessárias, ou fotografe a página que interessa.' });
         }
         if (unidade !== 'ACRIZIO' && unidade !== 'BARREIRO') {
             return res.status(400).json({ erro: 'Unidade inválida.' });
@@ -1137,23 +1221,31 @@ e prossiga com conhecimento geral, sinalizando que não houve fonte confirmada.
 `;
         }
 
-        // Bloco de instruções sobre as FOTOS (só entra no prompt se houver foto).
+        // Bloco de instruções sobre os ANEXOS (só entra no prompt se houver anexo).
+        // v7.1: o texto passa a citar PDF quando houver, para a IA não tratar o
+        // arquivo como se fosse uma foto solta.
         let blocoFotos = '';
         if (fotos.length > 0) {
+            const qtdPdf = fotos.filter(f => TIPOS_PDF.includes(f.mimeType)).length;
+            const qtdImg = fotos.length - qtdPdf;
+            const descricaoAnexos = [
+                qtdImg > 0 ? (qtdImg + ' imagem(ns)') : '',
+                qtdPdf > 0 ? (qtdPdf + ' PDF(s)') : ''
+            ].filter(Boolean).join(' e ');
             blocoFotos = `
-DOCUMENTOS EM FOTO (${fotos.length} imagem(ns) anexada(s)):
-- As imagens anexadas são DOCUMENTOS DE REFERÊNCIA fotografados (exames,
-  prontuários antigos, evoluções, receitas).
-- Use o conteúdo delas SOMENTE conforme a instrução do médico na mensagem
+DOCUMENTOS ANEXADOS (${descricaoAnexos}):
+- Os anexos são DOCUMENTOS DE REFERÊNCIA (exames, prontuários antigos,
+  evoluções, receitas), fotografados ou em PDF.
+- Use o conteúdo deles SOMENTE conforme a instrução do médico na mensagem
   (ex.: transcrever resultados de exame, aproveitar a história clínica,
   mesclar com a evolução atual).
-- A foto NUNCA é, por si só, um novo atendimento: o documento a gerar é o que
+- O anexo NUNCA é, por si só, um novo atendimento: o documento a gerar é o que
   o médico pediu na mensagem, no tipo de atendimento indicado acima.
 - PRIVACIDADE: IGNORE e OMITA qualquer identificador do paciente que apareça
-  na foto (nome, nome da mãe, CPF, endereço, telefone, convênio). Aproveite
+  no anexo (nome, nome da mãe, CPF, endereço, telefone, convênio). Aproveite
   APENAS os dados clínicos.
 - TRANSCRIÇÃO FIEL: copie números, unidades e valores de exames EXATAMENTE
-  como estão na foto. Se um trecho estiver ilegível, cortado ou borrado,
+  como estão no anexo. Se um trecho estiver ilegível, cortado ou borrado,
   escreva "[ilegível]" no lugar e avise na "discussao". É TERMINANTEMENTE
   PROIBIDO chutar, estimar ou completar valores que não dá para ler — valor
   de exame inventado é risco direto ao paciente.
@@ -1602,12 +1694,22 @@ ${mensagem}`;
             try {
                 // Gera as duas em paralelo para não somar os tempos de espera.
                 [textoGemini, textoClaude] = await Promise.all([
-                    chamarGemini(promptFinal, 'pro', usarBusca, fotos),
-                    chamarClaude(promptFinal, fotos)
+                    chamarGemini(promptFinal, 'pro', usarBusca, fotos, abortador.signal),
+                    chamarClaude(promptFinal, fotos, abortador.signal)
                 ]);
             } catch (e) {
+                // v7.1: se foi o médico que cancelou, sai calado — não há para
+                // quem responder e nada foi salvo (a comparação nunca salva).
+                if (clienteSaiu || ehAborto(e, abortador.signal)) {
+                    console.log('Comparação cancelada pelo médico (BE ' + beId + ').');
+                    return;
+                }
                 console.error('Erro na geração comparativa:', e.message);
                 return res.status(502).json({ erro: 'Não foi possível gerar as duas versões para comparar. Tente novamente.' });
+            }
+            if (clienteSaiu) {
+                console.log('Comparação descartada: o médico cancelou antes do fim (BE ' + beId + ').');
+                return;
             }
             const dadosGemini = posProcessar(extrairJson(textoGemini));
             const dadosClaude = posProcessar(extrairJson(textoClaude));
@@ -1662,10 +1764,23 @@ ${JSON.stringify(dadosClaude)}`;
         // ==============================================================
         let saida;
         try {
-            saida = await gerarComFallback(promptFinal, modeloId, usarBusca, fotos);
+            saida = await gerarComFallback(promptFinal, modeloId, usarBusca, fotos, abortador.signal);
         } catch (error) {
+            // v7.1: cancelamento não é erro. Sai calado, sem gravar nada.
+            if (clienteSaiu || ehAborto(error, abortador.signal)) {
+                console.log('Geração cancelada pelo médico (BE ' + beId + ') — nada gravado no histórico.');
+                return;
+            }
             console.error('Erro ao gerar com a IA:', error.message);
             return res.status(502).json({ erro: 'A IA está indisponível no momento. Tente novamente em instantes ou troque o modelo (Flash / Pro / Claude).' });
+        }
+
+        // v7.1: TRAVA DO CANCELAMENTO. Mesmo que a IA tenha terminado a tempo,
+        // se o médico já cancelou, o resultado é DESCARTADO e NADA é gravado —
+        // é isto que impede uma "etapa fantasma" no BE.
+        if (clienteSaiu) {
+            console.log('Resposta descartada: o médico cancelou antes do fim (BE ' + beId + ') — nada gravado no histórico.');
+            return;
         }
 
         let dados = posProcessar(saida.dados);
@@ -1717,148 +1832,4 @@ app.post('/api/escolher', limitarAbuso, async (req, res) => {
         const dados = resposta;
         dados._motorUsado = motorEscolhido || 'desconhecido';
 
-        const historicoPaciente = await lerHistorico(beId);
-        const quando = Date.now();
-        historicoPaciente.push({
-            medico: mensagem || '', comandos: op, resposta: dados,
-            sexo: sexo || '', idade: (idade !== undefined ? idade : ''),
-            tipo: ehEvolucao ? 'evolucao' : 'prontuario',
-            quando: quando
-        });
-        const salvou = await salvarHistorico(beId, historicoPaciente, sexo, idade, quando);
-        dados._historicoSalvo = salvou;
-        res.json(dados);
-    } catch (error) {
-        console.error('Erro ao salvar versão escolhida:', error);
-        res.status(500).json({ erro: 'Falha ao salvar a versão escolhida.' });
-    }
-});
-
-// ----------------------------------------------------------------------------
-//  ROTA: reabrir um caso pelo BE (clique no chip de recentes).
-//  Devolve a ÚLTIMA resposta salva no cache (72h) para aquele BE.
-// ----------------------------------------------------------------------------
-app.get('/api/historico/:beId', async (req, res) => {
-    const hist = await lerHistorico(req.params.beId);
-    if (!hist || hist.length === 0) {
-        return res.status(404).json({ erro: 'Sem histórico para este BE (pode ter expirado em 72h).' });
-    }
-    const ultimo = hist[hist.length - 1];
-    res.json({
-        beId: req.params.beId,
-        sexo: ultimo.sexo || '',
-        idade: ultimo.idade || '',
-        tipo: ultimo.tipo || 'prontuario',
-        resposta: ultimo.resposta || {}
-    });
-});
-
-// ----------------------------------------------------------------------------
-//  ROTA: linha do tempo de um BE (todas as etapas das últimas 72h).
-//  Devolve a pilha inteira (prontuário, correções, evoluções) em ordem, para
-//  o médico clicar e ver qualquer etapa. NÃO guarda nome do paciente (LGPD).
-// ----------------------------------------------------------------------------
-app.get('/api/timeline/:beId', async (req, res) => {
-    const hist = await lerHistorico(req.params.beId);
-    if (!hist || hist.length === 0) {
-        return res.status(404).json({ erro: 'Sem histórico para este BE (pode ter expirado em 72h).' });
-    }
-    const ultimo = hist[hist.length - 1];
-    const etapas = hist.map((h, i) => ({
-        indice: i,
-        tipo: h.tipo || 'prontuario',
-        quando: h.quando || 0,
-        correcao: !!(h.comandos && h.comandos.correcao),
-        resposta: h.resposta || {}
-    }));
-    res.json({
-        beId: req.params.beId,
-        sexo: ultimo.sexo || '',
-        idade: ultimo.idade || '',
-        etapas
-    });
-});
-
-// ----------------------------------------------------------------------------
-//  ROTA: lista dos BEs recentes (só número + sexo + idade — sem dado clínico).
-//  Usada para montar os "chips" na tela, sincronizados entre aparelhos.
-// ----------------------------------------------------------------------------
-app.get('/api/recentes', async (req, res) => {
-    if (!redis) return res.json({ recentes: [] });
-    try {
-        // Pega os BEs mais recentes do sorted set, já com o score (timestamp).
-        // Buscamos um pouco mais que 8 porque alguns podem já ter expirado.
-        const pares = await redis.zrevrange(CHAVE_RECENTES, 0, 29, 'WITHSCORES');
-        const lista = [];
-        for (let i = 0; i < pares.length; i += 2) {
-            const be = pares[i];
-            const quando = Number(pares[i + 1]) || 0;
-            // Só inclui se o BE ainda existe (não expirou nas 72h).
-            const existe = await redis.exists('be:' + be);
-            if (!existe) {
-                // Limpa resíduos para não acumular lixo no sorted set.
-                redis.zrem(CHAVE_RECENTES, be);
-                continue;
-            }
-            let sexo = '', idade = '';
-            try {
-                const m = await redis.get('meta:' + be);
-                if (m) { const o = JSON.parse(m); sexo = o.sexo || ''; idade = o.idade || ''; }
-            } catch (e) { /* metadado opcional */ }
-            lista.push({ be, sexo, idade, quando });
-            if (lista.length >= 8) break;
-        }
-        res.json({ recentes: lista });
-    } catch (e) {
-        console.error('Erro ao ler recentes do Redis:', e.message);
-        res.json({ recentes: [] });
-    }
-});
-
-// ----------------------------------------------------------------------------
-//  ROTAS DA PONTE DE FOTOS (celular -> computador, POR CÓDIGO DE 4 NÚMEROS)
-// ----------------------------------------------------------------------------
-//  Fluxo: o celular manda as fotos num pedido só e recebe um CÓDIGO de 4
-//  números (uso ÚNICO, vale 30 min); o outro aparelho digita o código e
-//  recebe as fotos, que são APAGADAS do servidor na entrega. Internamente,
-//  cada foto fica num registro próprio no Redis (o plano gratuito do Upstash
-//  limita ~1 MB por gravação) e um índice leve amarra tudo ao código.
-
-//  1) Recebe as fotos (1 a 9) e devolve o código gerado.
-app.post('/api/ponte', limitarAbuso, async (req, res) => {
-    try {
-        const { fotos } = req.body || {};
-        if (!Array.isArray(fotos) || fotos.length === 0) {
-            return res.status(400).json({ erro: 'Nenhuma foto recebida.' });
-        }
-        if (fotos.length > MAX_FOTOS_POR_CODIGO) {
-            return res.status(400).json({ erro: 'No máximo ' + MAX_FOTOS_POR_CODIGO + ' fotos por código.' });
-        }
-        for (const f of fotos) {
-            if (!f || !TIPOS_IMAGEM.includes(f.mimeType)) {
-                return res.status(400).json({ erro: 'Formato não aceito. Envie as fotos em JPEG ou PNG.' });
-            }
-            if (typeof f.data !== 'string' || f.data.length === 0 || f.data.length > TAMANHO_MAX_FOTO_PONTE) {
-                return res.status(400).json({ erro: 'Uma das fotos ficou grande demais mesmo após a compressão. Fotografe de novo, de mais perto ou por partes.' });
-            }
-        }
-        if (!redis) {
-            return res.status(503).json({ erro: 'A ponte de fotos usa o banco de histórico (Redis), que está indisponível agora. Você ainda pode anexar as fotos direto no aparelho em que for gerar o documento.' });
-        }
-        const codigo = await gerarCodigoPonte();
-        if (!codigo) {
-            return res.status(503).json({ erro: 'Não consegui gerar um código agora. Tente de novo em instantes.' });
-        }
-        // Guarda cada foto num registro próprio (limite de 1 MB por gravação).
-        for (const f of fotos) {
-            const r = await guardarFotoPonte(codigo, f.mimeType, f.data);
-            if (r.erro) {
-                // Falhou no meio: limpa o que já foi e devolve o erro.
-                await apagarFotosPonte(codigo);
-                return res.status(503).json({ erro: r.erro });
-            }
-        }
-        res.json({ ok: true, codigo, fotos: fotos.length });
-    } catch (e) {
-        console.error('Erro ao receber fotos da ponte:', e);
-        res.status(500).json({ erro: 'Falha ao receber as fotos.' });
+        const historicoPaciente 
