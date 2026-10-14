@@ -1,5 +1,18 @@
 // ============================================================================
-//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v8.2.1
+//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v8.2.2
+//
+//  v8.2.2 (14/out/2026) — CRÉDITO ESGOTADO + CUSTO NO LOG.
+//    • Na madrugada de 14/out os créditos pré-pagos do Gemini acabaram (HTTP
+//      402, "prepayment credits are depleted"). O sistema já não caía sozinho
+//      para o Claude, mas a tela mostrava só "A IA está indisponível" — o
+//      médico não tinha como saber que o problema era SALDO. Agora o servidor
+//      reconhece crédito esgotado (do Gemini E do Claude), PARA e AVISA em
+//      português qual IA ficou sem saldo e o que fazer. Decisão do médico em
+//      14/out: NÃO cair sozinho para o Claude (custa ~2,5x mais sem aviso).
+//    • Toda geração paga agora deixa UMA linha "CUSTO:" no log do Render, com
+//      motor, tipo de documento, tokens de entrada e saída e o valor em reais.
+//      Nenhum dado do paciente vai nessa linha. Até a v8.2.1 o custo só
+//      aparecia na tela e sumia: não havia como somar o gasto real do mês.
 //
 //  v8.2.1 (02/out/2026) — O "JSON INVÁLIDO" DO CLAUDE, TERCEIRA E ÚLTIMA CAUSA.
 //    Três semanas de plantão com a v8.2 deixaram só DUAS falhas no log (29/set
@@ -1866,8 +1879,36 @@ function ehAborto(error, sinal) {
 //  Claude). Cobre 503 (Service Unavailable), 429 (limite) e 500 (erro interno).
 function ehFalhaTemporariaGemini(error) {
     const msg = (error && error.message) ? error.message : String(error || '');
+    // v8.2.2: crédito esgotado NUNCA é falha temporária (insistir não adianta).
+    if (qualCreditoEsgotou(error)) return false;
     return /\b(503|429|500)\b/.test(msg)
         || /unavailable|overloaded|high demand|try again|internal/i.test(msg);
+}
+
+//  v8.2.2 — CRÉDITO ESGOTADO. Quando o saldo pré-pago acaba, o Google devolve
+//  HTTP 402 ("prepayment credits are depleted") e a Anthropic devolve
+//  "credit balance is too low". Não é sobrecarga: repetir não resolve. E cair
+//  sozinho para o Claude foi RECUSADO pelo médico em 14/out — trocaria R$ 0,36
+//  por R$ 0,90 sem ele saber. O sistema PARA e AVISA (regra 15).
+//  Devolve 'gemini', 'claude' ou null (quando não é falta de crédito).
+function qualCreditoEsgotou(error) {
+    const msg = (error && error.message) ? error.message : String(error || '');
+    if (/credit balance is too low/i.test(msg)) return 'claude';
+    if (/\b402\b/.test(msg) || /prepayment credits|credits are depleted/i.test(msg)) {
+        return /Claude HTTP/i.test(msg) ? 'claude' : 'gemini';
+    }
+    return null;
+}
+
+function mensagemCreditoEsgotado(qual) {
+    if (qual === 'claude') {
+        return 'Os créditos do CLAUDE (Anthropic) ACABARAM. Nada foi gerado e nada foi gravado. '
+            + 'Para voltar a usar o Claude, recarregue o saldo no console da Anthropic (console.anthropic.com). '
+            + 'Enquanto isso, escolha o Gemini Flash ou o Gemini Pro no seletor "Cérebro da IA" e envie de novo.';
+    }
+    return 'Os créditos do GEMINI (Google) ACABARAM. Nada foi gerado e nada foi gravado. '
+        + 'Para voltar a usar o Flash e o Pro, recarregue o saldo no Google AI Studio (aistudio.google.com). '
+        + 'Enquanto isso, escolha o Claude no seletor "Cérebro da IA" e envie de novo.';
 }
 
 //  Chama o Claude (Anthropic) via API HTTP. Não precisa de biblioteca: usamos o
@@ -1978,6 +2019,28 @@ async function chamarClaude(promptFinal, imagens, sinal) {
     };
 }
 
+//  v8.2.2 — LINHA DE CUSTO NO LOG DO RENDER. Formato fixo, fácil de somar:
+//    CUSTO: motor=pro tipo=evolucao entrada=9012 saida=5133 brl=0.364 anexos=0
+//  'motor' diz quem de fato respondeu: pro | flash | flash-reserva | claude |
+//  claude-fallback (quando o Gemini caiu e o Claude assumiu). Nenhum texto
+//  clínico, nenhum BE: só números.
+function registrarCustoNoLog(saida, modeloId, tipo, nAnexos) {
+    try {
+        let motor;
+        if (saida.motorUsado === 'claude') motor = saida.caiuParaClaude ? 'claude-fallback' : 'claude';
+        else if (modeloId === 'flash') motor = saida.modeloReserva ? 'flash-reserva' : 'flash';
+        else motor = 'pro';
+        const t = saida.tokens || {};
+        console.log('CUSTO: motor=' + motor + ' tipo=' + tipo
+            + ' entrada=' + (Number.isFinite(t.entrada) ? t.entrada : '?')
+            + ' saida=' + (Number.isFinite(t.saida) ? t.saida : '?')
+            + ' brl=' + (saida.custo ? saida.custo.brl.toFixed(3) : 'nao_calculado')
+            + ' anexos=' + (nAnexos || 0));
+    } catch (e) {
+        console.error('Falha ao registrar custo no log:', e && e.message);
+    }
+}
+
 //  ORQUESTRADOR: recebe o prompt e o modelo escolhido na tela. Decide quem chama
 //  e aplica o FALLBACK AUTOMÁTICO. Devolve { dados, motorUsado, caiuParaClaude, custo }.
 //   - modeloId 'claude'        -> chama o Claude direto.
@@ -1989,6 +2052,7 @@ async function gerarComFallback(promptFinal, modeloId, usarBusca, imagens, sinal
         return {
             dados: extrairJson(r.texto), motorUsado: 'claude', caiuParaClaude: false,
             textoBruto: r.texto, paradaPor: r.paradaPor, reparoJson: ultimoReparoJson,
+            tokens: { entrada: r.tokensEntrada, saida: r.tokensSaida },
             custo: calcularCustoBRL('claude', r.tokensEntrada, r.tokensSaida)
         };
     }
@@ -2013,6 +2077,7 @@ async function gerarComFallback(promptFinal, modeloId, usarBusca, imagens, sinal
     const empacotarGemini = (r) => ({
         dados: extrairJson(r.texto), motorUsado: 'gemini', caiuParaClaude: false,
         textoBruto: r.texto, paradaPor: r.paradaPor || '', reparoJson: ultimoReparoJson,
+        tokens: { entrada: r.tokensEntrada, saida: r.tokensSaida },
         custo: calcularCustoBRL(modeloId === 'flash' ? 'gemini_flash' : 'gemini_pro', r.tokensEntrada, r.tokensSaida)
     });
     //  Pausa que o botão "Cancelar geração" interrompe na hora.
@@ -2077,6 +2142,7 @@ async function gerarComFallback(promptFinal, modeloId, usarBusca, imagens, sinal
             return {
                 dados: extrairJson(r.texto), motorUsado: 'claude', caiuParaClaude: true,
                 textoBruto: r.texto, paradaPor: r.paradaPor, reparoJson: ultimoReparoJson,
+                tokens: { entrada: r.tokensEntrada, saida: r.tokensSaida },
                 custo: calcularCustoBRL('claude', r.tokensEntrada, r.tokensSaida)
             };
         }
@@ -3217,6 +3283,12 @@ ${mensagemPrompt}`;
                     return;
                 }
                 console.error('Erro na geração comparativa: ' + (e && e.message ? e.message : String(e)));
+                const semCreditoCmp = qualCreditoEsgotou(e);
+                if (semCreditoCmp) {
+                    console.error('CRÉDITO ESGOTADO: ' + semCreditoCmp + ' (comparação) — aviso enviado à tela.');
+                    return res.status(402).json({ erro: mensagemCreditoEsgotado(semCreditoCmp)
+                        + ' A comparação precisa das DUAS IAs com saldo.' });
+                }
                 return res.status(502).json({ erro: 'Não foi possível gerar as duas versões para comparar. Tente novamente.' });
             }
             if (clienteSaiu) {
@@ -3269,6 +3341,14 @@ ${JSON.stringify(dadosClaude)}`;
             } catch (e) {
                 console.error('Erro ao resumir diferenças:', e.message);
             }
+            // v8.2.2 — custo da comparação no log (Claude já inclui o resumo).
+            console.log('CUSTO: motor=comparacao tipo=' + (ehInternacao ? 'internacao' : ehEvolucao ? 'evolucao' : 'prontuario')
+                + ' entrada=' + ((rGemini.tokensEntrada || 0) + (rClaude.tokensEntrada || 0))
+                + ' saida=' + ((rGemini.tokensSaida || 0) + (rClaude.tokensSaida || 0))
+                + ' brl=' + (custoGemini && custoClaude ? (custoGemini.brl + custoClaude.brl).toFixed(3) : 'nao_calculado')
+                + ' gemini_brl=' + (custoGemini ? custoGemini.brl.toFixed(3) : '?')
+                + ' claude_brl=' + (custoClaude ? custoClaude.brl.toFixed(3) : '?')
+                + ' anexos=' + fotos.length);
             if (!resumoDiferencas) {
                 resumoDiferencas = 'Não foi possível gerar o resumo automático das diferenças. Compare as duas versões manualmente antes de escolher.';
             }
@@ -3303,6 +3383,12 @@ ${JSON.stringify(dadosClaude)}`;
         try {
             saida = await gerarComFallback(promptFinal, modeloId, usarBusca, fotos, abortador.signal);
             console.log('Geração concluída em ' + ((Date.now() - inicio) / 1000).toFixed(1) + 's.');
+            // v8.2.2 — UMA linha de custo por geração paga, sem dado do paciente.
+            // Fica ANTES de qualquer descarte (cancelamento tardio, JSON inválido):
+            // nesses casos a IA já cobrou, e o gasto tem de aparecer na conta.
+            registrarCustoNoLog(saida, modeloId,
+                ehInternacao ? 'internacao' : ehEvolucao ? 'evolucao' : 'prontuario',
+                fotos.length);
         } catch (error) {
             const gastou = ((Date.now() - inicio) / 1000).toFixed(1);
             // Cancelamento pelo médico: sai calado, sem gravar nada.
@@ -3324,6 +3410,12 @@ ${JSON.stringify(dadosClaude)}`;
             console.error('ERRO na geração após ' + gastou + 's. motor=' + (modeloId || 'pro')
                 + ' pdfs=' + nPdf + ' | mensagem: ' + (error && error.message ? error.message : String(error)));
             if (error && error.stack) console.error(error.stack.split('\n').slice(0, 4).join('\n'));
+            // v8.2.2 — saldo acabou: PARA e diz qual IA e o que fazer.
+            const semCredito = qualCreditoEsgotou(error);
+            if (semCredito) {
+                console.error('CRÉDITO ESGOTADO: ' + semCredito + ' — aviso enviado à tela, sem cair para outra IA.');
+                return res.status(402).json({ erro: mensagemCreditoEsgotado(semCredito) });
+            }
             return res.status(502).json({ erro: 'A IA está indisponível no momento. Tente novamente em instantes ou troque o modelo (Flash / Pro / Claude).' });
         } finally {
             clearTimeout(relogio);
@@ -3705,10 +3797,10 @@ app.use((err, req, res, next) => {
 // QUAL versão está de fato rodando no Render. Serve para pegar o caso em que o
 // deploy falhou e o Render continuou servindo a versão anterior (o servidor
 // segue no ar, então nada parece errado — mas o código novo não está valendo).
-const VERSAO_SERVIDOR = 'v8.2.1';
+const VERSAO_SERVIDOR = 'v8.2.2';
 app.get('/', (req, res) => res.send(
     'Servidor do Prontuario Rapido ' + VERSAO_SERVIDOR + ' no ar. '
-    + 'Linhas esperadas no server.js: 3715.'
+    + 'Linhas esperadas no server.js: 3807.'
 ));
 
 const PORT = process.env.PORT || 3000;
