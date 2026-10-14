@@ -1,5 +1,14 @@
 // ============================================================================
-//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v8.2.2
+//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v8.3
+//
+//  v8.3 (14/out/2026) — BANCO DE DOCUMENTOS (para revisão pelo Claude).
+//    Cada documento gerado passa a ter uma CÓPIA num banco Postgres do próprio
+//    Render (variável DATABASE_URL). O conector do Render deixa o Claude ler
+//    esse banco direto, sem o médico copiar e colar nada. Regras decididas pelo
+//    médico em 14/out: guarda por 30 DIAS e apaga sozinho; grava o BE (para o
+//    médico dizer "o BE X saiu errado"); nenhum anexo é guardado (regra 14),
+//    só a contagem. Se a DATABASE_URL não existir ou o banco cair, o
+//    atendimento NÃO é afetado: o servidor só registra o problema no log.
 //
 //  v8.2.2 (14/out/2026) — CRÉDITO ESGOTADO + CUSTO NO LOG.
 //    • Na madrugada de 14/out os créditos pré-pagos do Gemini acabaram (HTTP
@@ -679,6 +688,126 @@ if (process.env.REDIS_URL) {
 }
 
 const CHAVE_RECENTES = 'recentes'; // sorted set: score = timestamp, membro = BE
+
+// ----------------------------------------------------------------------------
+//  v8.3 — BANCO DE DOCUMENTOS (Postgres no Render).
+//  Existe para o CLAUDE revisar o que a IA gerou, lendo pelo conector do
+//  Render, sem o médico copiar e colar. NÃO é o histórico do plantão (esse
+//  continua no Redis, 72 h). Diferenças de propósito:
+//    • guarda 30 dias (decisão do médico, 14/out) e APAGA SOZINHO o que passar;
+//    • guarda o relato, as opções e o documento exatamente como a tela recebeu;
+//    • anexo NUNCA entra (regra 14) — só a quantidade;
+//    • qualquer falha aqui é engolida: o médico recebe o documento do mesmo
+//      jeito, e o erro vai só para o log do Render (sem texto clínico).
+// ----------------------------------------------------------------------------
+const DIAS_GUARDA_DOCUMENTOS = 30;
+let bancoDocs = null;
+let bancoDocsPronto = null; // Promise da criação da tabela
+if (process.env.DATABASE_URL) {
+    try {
+        const { Pool } = require('pg');
+        const url = process.env.DATABASE_URL;
+        // Endereço INTERNO do Render (sem ponto no nome do servidor) dispensa
+        // SSL; o endereço externo exige.
+        const hostInterno = /@[^.:/]+(:\d+)?\//.test(url);
+        bancoDocs = new Pool({
+            connectionString: url,
+            ssl: hostInterno ? false : { rejectUnauthorized: false },
+            max: 3,
+            connectionTimeoutMillis: 5000
+        });
+        bancoDocs.on('error', (e) => console.error('Banco de documentos: erro de conexão:', e.message));
+        bancoDocsPronto = bancoDocs.query(`
+            CREATE TABLE IF NOT EXISTS documentos (
+                id              BIGSERIAL PRIMARY KEY,
+                criado_em       TIMESTAMPTZ NOT NULL DEFAULT now(),
+                be              TEXT,
+                unidade         TEXT,
+                tipo            TEXT,
+                motor           TEXT,
+                sexo            TEXT,
+                idade           TEXT,
+                relato          TEXT,
+                opcoes          JSONB,
+                n_anexos        INT,
+                documento       JSONB,
+                texto_bruto     TEXT,
+                reparo_json     TEXT,
+                tokens_entrada  INT,
+                tokens_saida    INT,
+                custo_brl       NUMERIC(8,3),
+                versao_servidor TEXT
+            );
+            CREATE INDEX IF NOT EXISTS documentos_be ON documentos (be);
+            CREATE INDEX IF NOT EXISTS documentos_criado ON documentos (criado_em);
+        `).then(() => {
+            console.log('Banco de documentos conectado (guarda ' + DIAS_GUARDA_DOCUMENTOS + ' dias).');
+            return apagarDocumentosVencidos();
+        }).catch((e) => {
+            console.error('Banco de documentos indisponível:', e.message);
+            bancoDocs = null;
+        });
+        // O servidor hiberna quando ocioso; por isso a limpeza roda ao ligar
+        // (acima) e de hora em hora enquanto estiver acordado.
+        setInterval(() => { apagarDocumentosVencidos(); }, 60 * 60 * 1000).unref();
+    } catch (e) {
+        console.error('Falha ao iniciar o banco de documentos:', e.message);
+        bancoDocs = null;
+    }
+} else {
+    console.log('Banco de documentos DESLIGADO (DATABASE_URL não configurada). O atendimento segue normal.');
+}
+
+async function apagarDocumentosVencidos() {
+    if (!bancoDocs) return;
+    try {
+        const r = await bancoDocs.query(
+            "DELETE FROM documentos WHERE criado_em < now() - make_interval(days => $1)",
+            [DIAS_GUARDA_DOCUMENTOS]);
+        if (r.rowCount) console.log('Banco de documentos: ' + r.rowCount + ' documento(s) com mais de '
+            + DIAS_GUARDA_DOCUMENTOS + ' dias apagado(s).');
+    } catch (e) {
+        console.error('Banco de documentos: falha na limpeza:', e.message);
+    }
+}
+
+//  Grava UMA cópia. Nunca lança erro e nunca atrasa a resposta ao médico: quem
+//  chama NÃO espera (sem await). O conteúdo é congelado aqui, na hora da
+//  chamada, para que mudanças posteriores no objeto não entrem no banco.
+function guardarDocumento(reg) {
+    if (!bancoDocs) return;
+    let docJson = null;
+    try {
+        if (reg.documento !== undefined && reg.documento !== null) docJson = JSON.stringify(reg.documento);
+    } catch (e) { docJson = null; }
+    const valores = [
+        reg.be != null ? String(reg.be) : null,
+        reg.unidade || null,
+        reg.tipo || null,
+        reg.motor || null,
+        reg.sexo != null ? String(reg.sexo) : null,
+        reg.idade != null ? String(reg.idade) : null,
+        reg.relato || null,
+        reg.opcoes ? JSON.stringify(reg.opcoes) : null,
+        Number.isFinite(reg.nAnexos) ? reg.nAnexos : 0,
+        docJson,
+        reg.textoBruto || null,
+        reg.reparoJson || null,
+        Number.isFinite(reg.tokensEntrada) ? reg.tokensEntrada : null,
+        Number.isFinite(reg.tokensSaida) ? reg.tokensSaida : null,
+        reg.custoBrl != null && Number.isFinite(reg.custoBrl) ? reg.custoBrl : null,
+        VERSAO_SERVIDOR
+    ];
+    Promise.resolve(bancoDocsPronto).then(() => {
+        if (!bancoDocs) return;
+        return bancoDocs.query(
+            'INSERT INTO documentos (be, unidade, tipo, motor, sexo, idade, relato, opcoes, n_anexos, '
+            + 'documento, texto_bruto, reparo_json, tokens_entrada, tokens_saida, custo_brl, versao_servidor) '
+            + 'VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)', valores);
+    }).catch((e) => {
+        console.error('Banco de documentos: falha ao gravar (o médico recebeu o documento normalmente):', e.message);
+    });
+}
 
 // Lê a pilha de atendimentos de um BE. Retorna [] se não houver ou se o Redis
 // estiver fora (degradação elegante).
@@ -3353,6 +3482,17 @@ ${JSON.stringify(dadosClaude)}`;
                 resumoDiferencas = 'Não foi possível gerar o resumo automático das diferenças. Compare as duas versões manualmente antes de escolher.';
             }
 
+            // v8.3 — as duas versões e o resumo vão juntos para o banco.
+            guardarDocumento({
+                be: beId, unidade, sexo, idade, relato: mensagem, opcoes: op, nAnexos: fotos.length,
+                tipo: ehInternacao ? 'internacao' : ehEvolucao ? 'evolucao' : 'prontuario',
+                motor: 'comparacao',
+                documento: { versaoGemini: dadosGemini, versaoClaude: dadosClaude, resumoDiferencas },
+                tokensEntrada: (rGemini.tokensEntrada || 0) + (rClaude.tokensEntrada || 0),
+                tokensSaida: (rGemini.tokensSaida || 0) + (rClaude.tokensSaida || 0),
+                custoBrl: (custoGemini && custoClaude) ? Number((custoGemini.brl + custoClaude.brl).toFixed(3)) : null
+            });
+
             // Devolve as DUAS versões + o resumo + o custo dos dois motores.
             // A escolha (e o salvamento) é feita depois, pela tela, na rota
             // /api/escolher.
@@ -3455,6 +3595,15 @@ ${JSON.stringify(dadosClaude)}`;
                 + trecho
                 + ' inicio=' + JSON.stringify(bruto.slice(0, 120))
                 + ' fim=' + JSON.stringify(bruto.slice(-120)));
+            // v8.3 — a resposta quebrada também vai para o banco: é justamente
+            // a que mais precisa ser estudada depois.
+            guardarDocumento({
+                be: beId, unidade, sexo, idade, relato: mensagem, opcoes: op, nAnexos: fotos.length,
+                tipo: ehInternacao ? 'internacao' : ehEvolucao ? 'evolucao' : 'prontuario',
+                motor: 'json_invalido:' + (saida.motorUsado || '?'), documento: null, textoBruto: bruto,
+                tokensEntrada: saida.tokens && saida.tokens.entrada, tokensSaida: saida.tokens && saida.tokens.saida,
+                custoBrl: saida.custo ? saida.custo.brl : null
+            });
             return erroJsonInvalido();
         }
 
@@ -3483,6 +3632,18 @@ ${JSON.stringify(dadosClaude)}`;
         dados._caiuParaClaude = saida.caiuParaClaude;
         // v7.9: custo estimado em reais desta geração (null se não deu pra calcular).
         dados._custo = saida.custo;
+
+        // v8.3 — cópia para o banco de documentos (revisão pelo Claude).
+        guardarDocumento({
+            be: beId, unidade, sexo, idade, relato: mensagem, opcoes: op, nAnexos: fotos.length,
+            tipo: ehInternacao ? 'internacao' : ehEvolucao ? 'evolucao' : 'prontuario',
+            motor: saida.motorUsado === 'claude'
+                ? (saida.caiuParaClaude ? 'claude-fallback' : 'claude')
+                : (modeloId === 'flash' ? (saida.modeloReserva ? 'flash-reserva' : 'flash') : 'pro'),
+            documento: dados, reparoJson: saida.reparoJson || null,
+            tokensEntrada: saida.tokens && saida.tokens.entrada, tokensSaida: saida.tokens && saida.tokens.saida,
+            custoBrl: saida.custo ? saida.custo.brl : null
+        });
 
         // Salva no histórico (guarda também sexo/idade/tipo p/ reabrir o caso).
         // IMPORTANTE: as fotos em si NÃO entram aqui — só a CONTAGEM, para
@@ -3534,6 +3695,12 @@ app.post('/api/escolher', limitarAbuso, async (req, res) => {
         });
         const salvou = await salvarHistorico(beId, historicoPaciente, sexo, idade, quando);
         dados._historicoSalvo = salvou;
+        // v8.3 — registra QUAL versão o médico escolheu depois da comparação.
+        guardarDocumento({
+            be: beId, sexo, idade, relato: mensagem, opcoes: op,
+            tipo: ehInternacao ? 'internacao' : ehEvolucao ? 'evolucao' : 'prontuario',
+            motor: 'escolhida:' + (motorEscolhido || 'desconhecido'), documento: dados
+        });
         res.json(dados);
     } catch (error) {
         console.error('Erro ao salvar versão escolhida:', error);
@@ -3797,10 +3964,10 @@ app.use((err, req, res, next) => {
 // QUAL versão está de fato rodando no Render. Serve para pegar o caso em que o
 // deploy falhou e o Render continuou servindo a versão anterior (o servidor
 // segue no ar, então nada parece errado — mas o código novo não está valendo).
-const VERSAO_SERVIDOR = 'v8.2.2';
+const VERSAO_SERVIDOR = 'v8.3';
 app.get('/', (req, res) => res.send(
     'Servidor do Prontuario Rapido ' + VERSAO_SERVIDOR + ' no ar. '
-    + 'Linhas esperadas no server.js: 3807.'
+    + 'Linhas esperadas no server.js: 3974.'
 ));
 
 const PORT = process.env.PORT || 3000;
