@@ -426,19 +426,19 @@ const diluicoesBarreiro = [
       "EV"
     ],
     "viasOutras": [],
-    "reconstituicao": "SF 0,9% - 5mL",
+    "reconstituicao": "SF 0,9% 5 mL",
     "evDireto": null,
-    "infusao": null,
-    "semRotulo": {
+    "infusao": {
       "diluente": "SF 0,9%",
-      "volume": "150 mL"
+      "volume": "100 mL"
     },
+    "semRotulo": null,
     "naoDilui": false,
     "completo": true,
     "_tempoInfusao": "Infusão lenta - mínimo 20 minutos",
     "_concentracaoMaxima": "",
-    "_observacao": "Após reconstituição/diluição, uso imediato.",
-    "fonte": "EBSERH/HC-UFTM CFT.001 v2 (06/08/2024)"
+    "_observacao": "Após reconstituição/diluição, uso imediato. Fonte trazia 150 mL sem dizer o modo; v8.4: infusão em 100 mL por decisão do médico.",
+    "fonte": "EBSERH/HC-UFTM CFT.001 v2 (06/08/2024), volume de infusão (100 mL) definido pelo médico"
   },
   {
     "principio": "cisatracúrio",
