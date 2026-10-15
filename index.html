@@ -1,6 +1,20 @@
 <!DOCTYPE html>
 <!--
-  PRONTUÁRIO RÁPIDO - TELA (FRONTEND) - v8.2.1 - 02/out/2026
+  PRONTUÁRIO RÁPIDO - TELA (FRONTEND) - v8.4 - 15/out/2026
+  Novidades da v8.4:
+   1) O botão "📋 Copiar" do documento inteiro passa a existir NAS DUAS
+      UNIDADES (antes só no Acrízio). Numa evolução ele se chama "Copiar
+      evolução inteira"; no prontuário, "Copiar prontuário inteiro". A
+      unidade não decide mais se o botão aparece — só se há o que copiar.
+   2) SINAIS VITAIS NA EVOLUÇÃO: o servidor v8.4 os coloca DENTRO do texto,
+      na linha logo antes do "Ao exame:". Por isso, quando eles já estão no
+      texto, a tela não os junta de novo ao exame físico (Acrízio) nem os
+      repete no topo da cópia. Casos gerados antes da v8.4 (sem os vitais no
+      texto) continuam como eram. No Barreiro o quadro de vitais continua
+      aparecendo, para digitar nos campos próprios do SIGRAH.
+  Precisa do server.js v8.4 no Render: os dois arquivos sobem JUNTOS.
+
+  Novidades da v8.2.1 — OS SINAIS VITAIS SUMIAM DA CÓPIA DA EVOLUÇÃO:
   Novidades da v8.2.1 — OS SINAIS VITAIS SUMIAM DA CÓPIA DA EVOLUÇÃO:
    1) BUG RELATADO PELO MÉDICO: numa EVOLUÇÃO com sinais vitais digitados, o
       botão "📋 Copiar prontuário inteiro" copiava a evolução (já com os
@@ -912,7 +926,7 @@
     // prontuario mas é exibido como uma caixa do prontuário, entre o Exame
     // Físico e a Hipótese Diagnóstica. Vem vazio no modo Evolução (lá o
     // servidor já colou o conteúdo dentro do texto corrido da evolução).
-    function montarProntuario(pront, exames){
+    function montarProntuario(pront, exames, textoEvolucao){
         const grupo = document.getElementById('grupoProntuario');
         grupo.innerHTML = '';
         if(!pront) pront = {};
@@ -926,7 +940,13 @@
         // v8.2.1: guarda os vitais ANTES da fusão do Acrízio (ver copiarProntuarioInteiro).
         sinaisVitaisAtuais = (pront.sinais_vitais || '').trim();
         const pView = Object.assign({}, pront);
-        if(unidade === 'ACRIZIO'){
+        // v8.4: na evolução gerada pelo servidor v8.4 os vitais já estão
+        // DENTRO do texto (linha logo antes do "Ao exame:"). Aí o Acrízio não
+        // os funde de novo no exame físico — sairiam duas vezes.
+        const vitNoTexto = vitaisJaNoTexto(textoEvolucao, pView.sinais_vitais);
+        if(unidade === 'ACRIZIO' && vitNoTexto){
+            pView.sinais_vitais = '';
+        } else if(unidade === 'ACRIZIO'){
             const vit = (pView.sinais_vitais || '').trim();
             const ef  = (pView.exame_fisico_texto || '').trim();
             if(vit){
@@ -1007,7 +1027,7 @@
         // (colado pelo servidor, no fim, após uma linha em branco) — por isso
         // a caixa própria só é montada quando NÃO é evolução.
         const ehEvol = !!(data.evolucao && data.evolucao.trim());
-        montarProntuario(data.prontuario, ehEvol ? '' : data.exames_complementares);
+        montarProntuario(data.prontuario, ehEvol ? '' : data.exames_complementares, ehEvol ? data.evolucao : '');
         setBox('docPresc','resPresc', data.prescricao_interna);
         setBox('docDiluicao','resDiluicao', data.diluicoes);
         setBox('docReceita','resReceita', data.receita);
@@ -1533,7 +1553,7 @@
         setTimeout(()=>{btn.innerText=orig; btn.style.background='transparent'; btn.style.color='var(--verde)';},1500);
     }
 
-    // ---- Copiar prontuário inteiro (SÓ Acrízio: junta os 6 campos numa tacada) ----
+    // ---- Copiar o documento inteiro (v8.4: nas DUAS unidades) ----
     // Junta História Clínica, História Pregressa, Sinais Vitais, Exame Físico,
     // Hipótese e Condutas — na ordem do SIGRAH — separados por uma linha em branco.
     // NÃO inclui prescrição, diluição, receita, relatório nem exames.
@@ -1552,7 +1572,10 @@
             // 1) SINAIS VITAIS. Vêm da variável guardada no montarProntuario,
             //    não de uma caixa da tela: no Acrízio eles foram fundidos na
             //    primeira linha do exame físico e não têm caixa própria.
-            if(sinaisVitaisAtuais){
+            //    v8.4: se os vitais JÁ estão dentro do texto da evolução (o
+            //    servidor os põe logo antes do exame), não entram de novo aqui.
+            const vitDentro = vitaisJaNoTexto(elEvol.innerText, sinaisVitaisAtuais);
+            if(sinaisVitaisAtuais && !vitDentro){
                 partes.push('SINAIS VITAIS\n' + sinaisVitaisAtuais);
             }
             // 2) O texto da evolução (o servidor já colou os exames no fim dele).
@@ -1609,15 +1632,23 @@
         document.body.removeChild(ta);
     }
 
-    // Mostra o botão "Copiar prontuário inteiro" só na UPA Acrízio.
+    // v8.4 — os vitais já estão dentro do texto da evolução? (servidor v8.4)
+    function vitaisJaNoTexto(texto, vitais){
+        const v = (vitais || '').trim();
+        return !!(v && texto && texto.indexOf(v) !== -1);
+    }
+
+    // Mostra o botão de copiar o documento inteiro quando há o que copiar.
+    // v8.4: vale para AS DUAS UNIDADES (antes era só o Acrízio). O nome
+    // acompanha o documento: evolução ou prontuário.
     function atualizarBotaoCopiarTudo(){
-        const unidade = document.getElementById('unidade').value;
         const btn = document.getElementById('btnCopiarTudo');
         const temProntuario = document.getElementById('grupoProntuario').children.length > 0;
         const docEvol = document.getElementById('docEvolucao');
         const temEvolucao = docEvol && docEvol.style.display !== 'none';
         const temConteudo = temProntuario || temEvolucao;
-        btn.style.display = (unidade === 'ACRIZIO' && temConteudo) ? 'inline-block' : 'none';
+        btn.innerText = temEvolucao ? '📋 Copiar evolução inteira' : '📋 Copiar prontuário inteiro';
+        btn.style.display = temConteudo ? 'inline-block' : 'none';
     }
     document.getElementById('unidade').addEventListener('change', atualizarBotaoCopiarTudo);
 

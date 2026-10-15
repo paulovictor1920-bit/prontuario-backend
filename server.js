@@ -1,5 +1,30 @@
 // ============================================================================
-//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v8.3
+//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v8.4
+//
+//  v8.4 (15/out/2026) — CORREÇÕES DA PRIMEIRA REVISÃO DE PLANTÃO PELO BANCO.
+//    Pedidas pelo médico depois da revisão do plantão de 14→15/out, sempre
+//    como REGRA GERAL e não como remendo do caso que apareceu:
+//    • TRAVA GERAL DE TOGGLE: prescrição da UPA, receita, relatório e pedidos
+//      de exame só existem com o botão LIGADO. A prescrição da UPA dependia só
+//      do prompt e escapou (ceftriaxona com o 💉 desligado). Quando a IA
+//      escreve algo que o servidor descarta, a discussão AVISA (regra 15).
+//    • EXAME FÍSICO: a IA pode caprichar no que o médico escreveu e usar os
+//      descritores gerais (BEG, afebril, eupneico...), mas NÃO pode inventar
+//      manobra/sinal com nome (Giordano), característica de achado (doloroso,
+//      móvel, bilateral), segmento não examinado, nem trazer o exame da
+//      admissão para a reavaliação. O modelo de exame normal ficou só com a
+//      normalidade básica (saíram pupilas e sinais meníngeos).
+//    • CONDUTA SEM ÚLTIMO ITEM NO INFINITIVO: todos os itens na primeira
+//      pessoa; a orientação de alarme vai dentro do item da alta. O servidor
+//      converte o verbo de abertura de TODOS os itens (acabou a exceção).
+//    • SINAIS VITAIS NA EVOLUÇÃO: o servidor os coloca dentro do texto, na
+//      linha logo antes do "Ao exame:" (antes saíam acima da evolução).
+//    • DILUIÇÃO PELA VIA: o registro da tabela agora tem de servir à via da
+//      linha. Linha IM não pega mais o preparo do pó EV (cetoprofeno IM saía
+//      com "reconstituir 5 mL"; ceftriaxona IM saía com 10 mL de água, e o
+//      registro próprio de ceftriaxona intramuscular nunca era escolhido).
+//    • Cetoprofeno EV: infusão em SF 0,9% 100 mL (decisão do médico; eram
+//      150 mL sem dizer se era seringa ou bolsa) — mudança no diluicoes.js.
 //
 //  v8.3 (14/out/2026) — BANCO DE DOCUMENTOS (para revisão pelo Claude).
 //    Cada documento gerado passa a ter uma CÓPIA num banco Postgres do próprio
@@ -985,6 +1010,31 @@ function limitarAbuso(req, res, next) {
 // ----------------------------------------------------------------------------
 
 // Remove acentos pra facilitar comparação de nomes de remédios.
+// v8.4 — TRAVA GERAL DE TOGGLE. Recebe a lista {campo, ligado, nome}; zera
+// todo campo cujo toggle está desligado e devolve os NOMES dos toggles cujo
+// campo tinha conteúdo de verdade (aquilo que a IA escreveu e foi jogado
+// fora). Campo que não é texto vira texto vazio. Determinística.
+function aplicarTravasDeToggle(dados, travas) {
+    const descartados = [];
+    (travas || []).forEach(t => {
+        const atual = dados[t.campo];
+        if (typeof atual !== 'string') { dados[t.campo] = ''; return; }
+        if (t.ligado) return;
+        if (atual.trim()) descartados.push(t.nome);
+        dados[t.campo] = '';
+    });
+    return descartados;
+}
+
+function avisoDescartePorToggle(nomes) {
+    const lista = nomes.join(', ');
+    const um = nomes.length === 1;
+    return '🔒 ' + (um ? 'O botão ' + lista + ' estava DESLIGADO' : 'Os botões ' + lista + ' estavam DESLIGADOS')
+        + ' e a IA escreveu ' + (um ? 'esse documento' : 'esses documentos') + ' mesmo assim — '
+        + (um ? 'foi descartado' : 'foram descartados') + '. Se era o que você queria, ligue o botão e gere de novo; '
+        + 'confira também se a conduta não cita o que foi descartado.';
+}
+
 function semAcento(txt) {
     return (txt || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 }
@@ -1057,6 +1107,36 @@ function buscarDiluicao(nomeMedicamento) {
     });
     if (!candidatos.length) return null;
 
+    // v8.4 — A VIA DA LINHA MANDA. Antes, o registro era escolhido só pelo
+    // nome: "Cetoprofeno 100 mg — 1 ampola IM" pegava o registro do pó EV e
+    // saía com "reconstituir: SF 0,9% 5 mL"; "Ceftriaxona 500 mg IM" pegava o
+    // registro EV e saía com 10 mL de água — volume de uso venoso numa
+    // injeção intramuscular. Agora, quando a linha diz a via, só servem os
+    // registros que trazem essa via. Se nenhum dos que casaram pelo nome
+    // serve, procura a VARIANTE do mesmo princípio ("ceftriaxona
+    // intramuscular") que traga a via. Se nem assim, NÃO imprime preparo de
+    // outra via: devolve viaIncompativel e quem chama decide se avisa.
+    const via = viaDaLinha(nomeMedicamento);
+    if (via) {
+        // Registro sem via cadastrada (vias vazia) não exclui nada: serve a qualquer linha.
+        const serveNaVia = item => !(item.vias && item.vias.length) || item.vias.indexOf(via) !== -1;
+        const compativeis = candidatos.filter(c => serveNaVia(c.item));
+        if (compativeis.length) {
+            candidatos.length = 0;
+            compativeis.forEach(c => candidatos.push(c));
+        } else {
+            const bases = candidatos.map(c => semAcento(c.item.principio).trim());
+            const variantes = diluicoesBarreiro.filter(item => {
+                if (!(item.vias && item.vias.length) || item.vias.indexOf(via) === -1) return false;
+                const pa = semAcento(item.principio).trim();
+                return bases.some(b => pa.indexOf(b + ' ') === 0);
+            });
+            if (variantes.length === 1) return variantes[0];
+            if (variantes.length > 1) return { ambiguo: true, opcoes: variantes };
+            return { viaIncompativel: true, via };
+        }
+    }
+
     // Preferência 1: chave mais longa (mais específica).
     const maior = Math.max(...candidatos.map(c => c.tam));
     const finais = [];
@@ -1085,6 +1165,28 @@ function buscarDiluicao(nomeMedicamento) {
 
     // Divergem e não deu para desempatar: NÃO escolhe no escuro, avisa.
     return { ambiguo: true, opcoes: finais };
+}
+
+// v8.4 — Qual via a linha declara? 'IM' (intramuscular pura), 'EV'
+// (venosa pura) ou null (não diz, ou diz as duas: "IM/EV"). Usada para
+// escolher o registro da tabela da MESMA via.
+function viaDaLinha(linha) {
+    const t = semAcento(linha);
+    const temIM = /(^|[^a-z])(im|intramuscular)($|[^a-z])/.test(t);
+    const temEV = /(^|[^a-z])(ev|iv|endovenos\w*|intravenos\w*)($|[^a-z])/.test(t);
+    if (temIM && !temEV) return 'IM';
+    if (temEV && !temIM) return 'EV';
+    return null;
+}
+
+// v8.4 — Linha cujo princípio só tem preparo de OUTRA via na tabela. Linha EV
+// sempre AVISA (venoso sempre tem preparo a conferir). Linha IM:
+// Ampola em solução (o caso comum em IM) não tem nada a preparar: silêncio.
+// Mas se a linha fala em frasco/pó, alguém vai ter de reconstituir e a
+// tabela não diz com quanto para esta via — aí AVISA (regra 15), em vez de
+// imprimir o volume da outra via.
+function linhaSugerePo(linha) {
+    return /(frasco|(^|[^a-z])fa($|[^a-z])|(^|[^a-z])po($|[^a-z])|liofil)/.test(semAcento(linha));
 }
 
 // A linha prescrita é intramuscular PURA? (v8) Se for, não recebe diluição de
@@ -1179,33 +1281,29 @@ function preferirPrimeiraPessoaConduta(txt) {
         ['liberar|liberad[ao]s?', 'libero'],
         ['avaliar|avaliad[ao]s?', 'avalio'],
         ['reavaliar|reavaliad[ao]s?', 'reavalio'],
+        // v8.4: entraram os verbos que antes eram "de fecho" no infinitivo.
+        ['acompanhar', 'acompanho'],
+        ['observar', 'observo'],
+        ['vigiar', 'vigio'],
+        ['aguardar', 'aguardo'],
+        ['conferir', 'confiro'],
+        ['indicar', 'indico'],
+        ['dar', 'dou'],
     ];
-    // v8.0 — O ÚLTIMO ITEM DA CONDUTA FICA NO INFINITIVO. Esta função estava
-    // DESFAZENDO a regra nova: a IA escrevia "Reavaliar após as medicações" e
-    // o servidor convertia para "Reavalio", nos três motores. O último item de
-    // fecho (reavaliação/acompanhamento) agora é preservado.
+    // v8.4 — ACABOU A EXCEÇÃO DO ÚLTIMO ITEM. A v8.0 mandava o último item
+    // ficar no infinitivo ("Reavaliar após...", "Orientar sinais de alarme...")
+    // e esta função o preservava. Na prática, o médico achou que isso
+    // denuncia texto de IA. Agora TODOS os itens saem na primeira pessoa,
+    // inclusive o último, e a orientação de alarme vai dentro do item da alta
+    // (isso é regra do prompt; o servidor só converte o verbo de abertura).
     const linhas = txt.split('\n');
-    let idxUltimoItem = -1;
-    for (let i = linhas.length - 1; i >= 0; i--) {
-        if (/^\s*(?:[-•*]\s*|\d+[.)]\s*)?\S/.test(linhas[i]) && linhas[i].trim() !== '') { idxUltimoItem = i; break; }
-    }
-    // v8.2: entraram "orientar" e "encaminhar". Com a ALTA já decidida pelo
-    // médico, o fecho da conduta deixa de ser a reavaliação na UPA e passa a
-    // ser a orientação de seguimento ("Orientar sinais de alarme e retorno...",
-    // "Encaminhar para seguimento na unidade básica"). Sem esta linha, o
-    // servidor convertia esse fecho para "Oriento"/"Encaminho" e desfazia a
-    // regra do último item no infinitivo — o mesmo erro que a v8.0 corrigiu
-    // para "Reavaliar". Vale SÓ no último item; no meio da conduta, "orientar"
-    // continua virando "oriento" normalmente.
-    const VERBOS_DE_FECHO = /^\s*(?:[-•*]\s*|\d+[.)]\s*)?(reavaliar|avaliar|acompanhar|observar|conferir|vigiar|aguardar|manter|orientar|encaminhar)\b/i;
-    return linhas.map((linha, i) => {
-        // No último item, se o verbo de abertura for um verbo de fecho no
-        // infinitivo, ele FICA como está — é exatamente o formato pedido.
-        if (i === idxUltimoItem && VERBOS_DE_FECHO.test(linha)) return linha;
+    return linhas.map((linha) => {
         for (const [padrao, pp] of trocas) {
             // O verbo precisa ABRIR o item: início da linha, opcionalmente
             // precedido de marcador ("-", "•", "*", "1.", "2)").
-            const re = new RegExp('^(\\s*(?:[-•*]\\s*|\\d+[.)]\\s*)?)(' + padrao + ')\\b', 'i');
+            // v8.4: fim de palavra com letra acentuada incluída — "\\b" do
+            // JavaScript não conhece acento ("Dará" casaria com "dar").
+            const re = new RegExp('^(\\s*(?:[-•*]\\s*|\\d+[.)]\\s*)?)(' + padrao + ')(?![A-Za-zÀ-ÿ])', 'i');
             const m = linha.match(re);
             if (m) {
                 const original = m[2];
@@ -1464,6 +1562,32 @@ function anexarExamesNaEvolucao(evolucao, exames) {
     return base + '\n\n' + ex;
 }
 
+// v8.4 — SINAIS VITAIS NA EVOLUÇÃO: logo ANTES do exame físico, dentro do
+// texto. Antes eles iam numa caixa à parte e, na cópia, saíam ACIMA da
+// evolução — no Acrízio isso era o padrão. A ordem de prontuário é: o que
+// aconteceu → sinais vitais → exame. Quem posiciona é o servidor
+// (determinístico), como já acontece com os exames complementares.
+// Onde o exame começa: na primeira menção a "Ao exame", "Ao EF", "Exame
+// físico" ou "EF:" no início do texto, de uma linha ou de uma frase. Se não
+// houver exame descrito, os vitais vão ao fim do texto clínico (os exames
+// complementares são colados DEPOIS disto, então continuam por último).
+// Não duplica: se os vitais já estão no texto, devolve como está.
+function inserirVitaisNaEvolucao(evolucao, vitais) {
+    const vit = (vitais || '').trim();
+    const base = (evolucao || '').trim();
+    if (!vit) return evolucao || '';
+    const linha = 'Sinais vitais: ' + vit;
+    if (!base) return linha;
+    if (base.indexOf(vit) !== -1) return base;
+    const re = /(^|\n|[.;!]\s+)(ao\s+exame|ao\s+ef(?![a-z])|exame\s+f[ií]sico|ef\s*:)/i;
+    const m = re.exec(base);
+    if (!m) return base + '\n' + linha;
+    const inicioExame = m.index + m[1].length;
+    const antes = base.slice(0, inicioExame).replace(/\s+$/, '');
+    const depois = base.slice(inicioExame);
+    return (antes ? antes + '\n' : '') + linha + '\n' + depois;
+}
+
 // Se um "CID: ..." vazou para dentro da conduta ou do exame físico (campos que
 // NÃO devem conter o CID, pois ele tem campo próprio), remove essa linha.
 // Conservador: só remove a LINHA que começa com "CID:" — não toca no resto.
@@ -1601,7 +1725,10 @@ function montarDiluicoes(textoPrescricao) {
         if (!pareceMedicacao(linha) || !ehInjetavel) return;
 
         const reg = buscarDiluicao(linha);
-        if (reg && reg.ambiguo) {
+        if (reg && reg.viaIncompativel) {
+            const t = linha.trim();
+            if (t && (reg.via === 'EV' || linhaSugerePo(linha))) resultado.naoEncontrados.push(t + ' (a tabela não traz o preparo para a via ' + reg.via + ')');
+        } else if (reg && reg.ambiguo) {
             // Mais de uma apresentação na tabela e a linha não diz qual é.
             const t = linha.trim();
             if (t) resultado.naoEncontrados.push(t + ' (mais de uma apresentação na tabela)');
@@ -1663,6 +1790,11 @@ function anexarDiluicaoInline(textoPrescricao) {
         if (!reg) {
             const t = linha.trim();
             if (t) resultado.naoEncontrados.push(t);
+            return linha;
+        }
+        if (reg.viaIncompativel) {
+            const t = linha.trim();
+            if (t && (reg.via === 'EV' || linhaSugerePo(linha))) resultado.naoEncontrados.push(t + ' (a tabela não traz o preparo para a via ' + reg.via + ')');
             return linha;
         }
         if (reg.ambiguo) {
@@ -2447,9 +2579,13 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
         if (medicarUpa) {
             instrucoesAcao += '- PRESCRIÇÃO INTERNA (medicações a fazer NA UPA).\n';
         } else {
-            instrucoesAcao += '- NÃO gere prescrição interna: deixe "prescricao_interna" VAZIA. Não houve medicação na unidade, a menos que o próprio relato do médico já descreva uma medicação como JÁ administrada.\n';
+            instrucoesAcao += '- NÃO gere prescrição interna: deixe "prescricao_interna" VAZIA (o botão de medicar na UPA está desligado e o sistema descarta o que for escrito aí). A conduta também NÃO tem item "Prescrevo na UPA". Medicação que o relato diz que JÁ foi feita é história do atendimento: cabe no texto clínico, não em prescrição.\n';
         }
-        if (op.alta) instrucoesAcao += '- RECEITA DOMICILIAR.\n';
+        if (op.alta) {
+            instrucoesAcao += '- RECEITA DOMICILIAR.\n';
+        } else {
+            instrucoesAcao += '- NÃO gere receita domiciliar: deixe "receita" VAZIA (o botão de receita está desligado e o sistema descarta o que for escrito aí).\n';
+        }
         // v8.2 — ALTA JÁ DECIDIDA PELO MÉDICO. Detecção determinística no
         // relato: quando o médico escreve que vai dar alta / liberar o
         // paciente, a conduta TEM que registrar isso e NÃO pode fechar com
@@ -2457,9 +2593,10 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
         const altaDeclarada = !ehInternacao && medicoDeclarouAlta(mensagem);
         if (altaDeclarada) {
             instrucoesAcao += '- ⚠️ O MÉDICO JÁ DECIDIU A ALTA NESTE ATENDIMENTO (está escrito no relato). '
-                + 'Aplique o CASO B da regra da conduta: registre a alta em item próprio e assertivo '
-                + '("Dou alta com receita e orientações..."), e feche a conduta com a orientação de '
-                + 'seguimento FORA da UPA. É PROIBIDO que o último item seja "Reavaliar", "Reavalio", '
+                + 'Aplique o CASO B da regra da conduta: o ÚLTIMO item é a alta, assertiva e na primeira pessoa, '
+                + 'com os sinais de alarme e o encaminhamento DENTRO dele ("Dou alta com receita, oriento sinais '
+                + 'de alarme e retorno imediato se piora, e encaminho para seguimento na atenção primária."). '
+                + 'Nenhum item depois dele. É PROIBIDO fechar com "Reavaliar", "Reavalio", '
                 + '"Mantenho em observação", "Observar" ou "Aguardar" — o paciente está indo embora, '
                 + 'não há reavaliação nesta unidade para acontecer depois.\n';
             console.log('Relato declara ALTA: instrução do CASO B da conduta incluída no prompt.');
@@ -2754,6 +2891,33 @@ REGRA ABSOLUTA DE FIDELIDADE AO RELATO:
   esse pode ser transcrito em "exames_complementares", em linha própria.
 - Não invente comorbidades, alergias ou achados de exame não relatados. Quando
   um dado não foi informado, registre como "não informado" ou deixe em branco.
+- EXAME FÍSICO — PODE CAPRICHAR, NÃO PODE INVENTAR (v8.4). Vale para
+  "exame_fisico_texto", para o texto da "evolucao", para o "relatorio" e para
+  qualquer outro campo que descreva o exame do paciente.
+  • PODE: reescrever o que o médico escreveu de forma mais completa e técnica.
+    PODE usar os descritores GERAIS de estado — bom estado geral, lúcido e
+    orientado, corado, hidratado, acianótico, anictérico, eupneico, afebril —
+    mesmo quando o médico só disse que o paciente está bem ou sem queixas. E,
+    quando ele escrever "restante do exame normal" (ou equivalente), PODE
+    descrever os sistemas com a normalidade básica do modelo do exame físico.
+  • NÃO PODE, em hipótese nenhuma, sem que o médico tenha escrito:
+    (1) citar MANOBRA ou SINAL SEMIOLÓGICO com nome — Giordano, Murphy,
+        Blumberg, Rovsing, Lasègue, Kernig, Brudzinski, rigidez de nuca,
+        sinais meníngeos, Homans, Romberg, pupilas, e qualquer outro —, nem
+        como positivo nem como negativo;
+    (2) dar a um achado uma CARACTERÍSTICA que o médico não deu: doloroso,
+        endurecido, móvel, aderido, tamanho, lado ("bilateral", "à direita"),
+        localização mais detalhada, "purulento" onde ele disse "placas";
+    (3) acrescentar um SEGMENTO de exame que ele não descreveu (otoscopia,
+        oroscopia, toque, exame ginecológico, pele, linfonodos, região
+        específica);
+    (4) criar qualquer achado que sirva para FECHAR ou AFASTAR um diagnóstico.
+        TESTE: se o achado escrito serviria de argumento a favor ou contra um
+        diagnóstico, ele PRECISA ter vindo do médico. Senão, não existe.
+  • Na EVOLUÇÃO, o exame é o de AGORA: não traga para a reavaliação os achados
+    do exame da admissão (histórico ou anexo) como se tivessem sido vistos de
+    novo.
+  • Na dúvida, escreva só o que o médico disse.
 
 ${contextoFarmacologico}
 ${blocoFontes}${blocoFotos}${blocoInternacao}
@@ -2873,8 +3037,13 @@ INSTRUÇÕES DE CADA CAMPO:
    reavaliação: resposta à conduta inicial, mudanças no quadro, estado atual e
    se há ou não sinais de alerta. NÃO repita a história clínica de admissão.
    Quando for EVOLUÇÃO, deixe os subcampos do "prontuario" VAZIOS (exceto
-   "conduta", que deve ser preenchida). Quando NÃO for evolução, deixe
-   "evolucao" como "".
+   "conduta", que deve ser preenchida, e "sinais_vitais", se o médico informou
+   algum). Quando NÃO for evolução, deixe "evolucao" como "".
+   ORDEM DO TEXTO (v8.4): primeiro o que aconteceu e como o paciente está
+   (queixas, resposta à conduta); DEPOIS, numa nova linha começando com
+   "Ao exame:", o exame físico. NÃO escreva os NÚMEROS dos sinais vitais no
+   texto da evolução: eles vão SÓ no campo "sinais_vitais", e o sistema os
+   coloca sozinho na linha logo antes do "Ao exame:".
    PROIBIDO TERMINAR A EVOLUÇÃO COM A CONDUTA (regra importante): o texto da
    evolução descreve APENAS o ESTADO do paciente na reavaliação. Ele NÃO pode
    terminar — nem conter — frases de plano/conduta do tipo "mantenho a
@@ -2882,7 +3051,7 @@ INSTRUÇÕES DE CADA CAMPO:
    "alta com orientações", "encaminho para...". Tudo isso pertence
    EXCLUSIVAMENTE ao campo "conduta", que aparece logo abaixo na tela e seria
    lido duas vezes. Encerre a evolução na descrição clínica (ex.: "...mantém-se
-   afebril, eupneico, aceitando dieta."), e PARE ali.
+   afebril e eupneico."), e PARE ali.
    NÃO escreva os resultados de exame dentro deste texto: eles vão no campo
    "exames_complementares" (item 2c) e o sistema os posiciona sozinho no lugar
    certo, no fim da evolução.
@@ -2994,7 +3163,12 @@ Raio-X de tórax (31/08): sem consolidações ou derrame pleural."
 ACV: ritmo cardíaco regular em 2 tempos, bulhas normofonéticas, sem sopros
 AR: MVF presente bilateralmente, sem RA
 AD: plano, flácido, RHA presentes, indolor à palpação, sem massas ou visceromegalias
-Neurológico: ECG 15, pupilas isocóricas e fotorreagentes, pares cranianos preservados, força e sensibilidade preservadas e simétricas nos 4 membros, sem sinais de irritação meníngea"
+Neurológico: vigil, orientada, sem déficits focais"
+     Este modelo é a NORMALIDADE BÁSICA, para quando o médico disser que o
+     restante do exame está normal. Manobras, sinais com nome e segmentos
+     específicos (pupilas, sinais meníngeos, Giordano, otoscopia...) só entram
+     se o médico os citou — ver "EXAME FÍSICO — PODE CAPRICHAR, NÃO PODE
+     INVENTAR", lá em cima.
      (campo 03 - parte textual)
    - "sinais_vitais": liste APENAS os sinais que o médico informou, no formato
      "RÓTULO: valor" separados por " | ". Rótulos padrão: SpO2, FC, FR, PA,
@@ -3026,14 +3200,18 @@ Neurológico: ECG 15, pupilas isocóricas e fotorreagentes, pares cranianos pres
      Escreva "Solicito internação hospitalar e preencho a documentação". É
      PROIBIDO escrever "interno o paciente", "aciono vaga", "transfiro para o
      hospital" ou qualquer forma que registre a internação como fato consumado.
-     ÚLTIMO ITEM NO INFINITIVO: o último item da conduta é o item de FECHO e SÓ
-     ele vai no INFINITIVO; os demais ficam na primeira pessoa. QUAL é o fecho
-     depende de o desfecho já estar decidido ou não — veja os dois casos logo
-     abaixo. Verbos aceitos no fecho: "Reavaliar...", "Acompanhar...",
-     "Observar...", "Conferir...", "Orientar...", "Encaminhar...", "Manter...".
+     TODOS OS ITENS NA PRIMEIRA PESSOA — INCLUSIVE O ÚLTIMO (v8.4): NENHUM item
+     da conduta começa com verbo no infinitivo. É PROIBIDO abrir item com
+     "Reavaliar", "Orientar", "Encaminhar", "Manter", "Observar", "Acompanhar",
+     "Aguardar" — o médico escreve "reavalio", "oriento", "encaminho",
+     "mantenho". Um último item solto no infinitivo denuncia texto de máquina.
+     A ORIENTAÇÃO DE SINAIS DE ALARME NÃO É ITEM PRÓPRIO: ela vai DENTRO do item
+     a que pertence (o da alta, ou o da receita). O FECHO da conduta depende de
+     o desfecho já estar decidido ou não — veja os dois casos logo abaixo.
      CASO A — DESFECHO EM ABERTO (o médico NÃO disse o que vai fazer com o
-     paciente): o fecho é a reavaliação na própria unidade — "Reavaliar após as
-     medicações e os resultados dos exames."
+     paciente): o último item é a reavaliação na própria unidade, na primeira
+     pessoa — "Mantenho em observação e reavalio após as medicações e os
+     resultados dos exames."
      CASO B — O MÉDICO JÁ DECIDIU A ALTA: se o relato do médico diz que ele vai
      dar alta, liberar o paciente, mandar para casa ou que a alta já foi dada,
      isso é FATO DO ATENDIMENTO e TEM QUE CONSTAR NA CONDUTA. Neste caso:
@@ -3041,16 +3219,16 @@ Neurológico: ECG 15, pupilas isocóricas e fotorreagentes, pares cranianos pres
          observação", "Observar", "Aguardar" ou qualquer item que deixe o
          paciente na unidade. O paciente está indo embora: não há reavaliação
          nesta UPA para acontecer depois.
-       - Registre a alta em item próprio, na primeira pessoa, junto do que foi
-         entregue e do encaminhamento: "Dou alta com receita e orientações, e
-         encaminho para seguimento na atenção primária."
-       - O fecho (último item, infinitivo) passa a ser a orientação de
-         seguimento fora da UPA: "Orientar sinais de alarme e retorno imediato
-         ao serviço de urgência se piora." ou "Encaminhar para seguimento na
-         unidade básica de saúde." Se o médico indicou retorno marcado em outro
-         serviço, o fecho pode ser "Reavaliar em 48 horas na unidade básica de
-         saúde" — reavaliação FORA da UPA é legítima; o que é proibido é
-         devolver o paciente à observação de quem acabou de liberá-lo.
+       - O ÚLTIMO item é a alta, na primeira pessoa, reunindo NUM SÓ ITEM o
+         que foi entregue, os sinais de alarme e o encaminhamento: "Dou alta
+         com receita, oriento sinais de alarme e retorno imediato se piora, e
+         encaminho para seguimento na atenção primária." Nada de item
+         separado depois dele só para orientar.
+       - Se o médico indicou retorno marcado em outro serviço, isso entra no
+         mesmo item: "...e encaminho para reavaliação em 48 horas na unidade
+         básica de saúde" — reavaliação FORA da UPA é legítima; o que é
+         proibido é devolver o paciente à observação de quem acabou de
+         liberá-lo.
      PROIBIDO CONDICIONAL DE DESFECHO: a conduta registra o que está sendo
      feito AGORA. É PROIBIDO escrever critério de alta, de liberação ou de
      desfecho ANTECIPADO — nada de "se melhorar, alta", "alta se estabilizar",
@@ -3082,12 +3260,11 @@ Neurológico: ECG 15, pupilas isocóricas e fotorreagentes, pares cranianos pres
      "- Prescrevo na UPA: Tenoxicam 20 mg IM + Dipirona 1 g (2 mL) EV, agora.
 - Solicito exames laboratoriais e radiografia de tórax.
 - Prescrevo para casa: Naproxeno 500 mg de 12/12 horas por 5 dias e Metoclopramida 10 mg de 8/8 horas se náusea, e oriento sinais de alerta.
-- Reavaliar após as medicações e os resultados dos exames."
+- Mantenho em observação e reavalio após as medicações e os resultados dos exames."
      MODELO (CASO B — o médico já decidiu a alta):
      "- Prescrevo na UPA: Dipirona 1 g (2 mL) EV + Escopolamina 20 mg EV, agora.
 - Prescrevo para casa: Dipirona 1 g de 6/6 horas se dor por 3 dias.
-- Dou alta com receita e orientações, e encaminho para seguimento na atenção primária.
-- Orientar sinais de alarme e retorno imediato ao serviço de urgência se piora."
+- Dou alta com receita, oriento sinais de alarme e retorno imediato se piora, e encaminho para seguimento na atenção primária."
      (campo 06)
 
 4. "prescricao_interna": medicações usadas NA UPA. APENAS itens da lista desta
@@ -3246,6 +3423,14 @@ ${mensagemPrompt}`;
                 dados.prontuario.sinais_vitais = normalizarSeparadorVitais(dados.prontuario.sinais_vitais);
             }
 
+            // --- v8.4: SINAIS VITAIS DENTRO DA EVOLUÇÃO, antes do exame ---
+            // Roda ANTES de colar os exames complementares, para o laboratório
+            // continuar sendo o último bloco. O campo sinais_vitais NÃO é
+            // apagado: no Barreiro ele alimenta o quadro de digitação do SIGRAH.
+            if (ehEvolucao && dados.prontuario && dados.prontuario.sinais_vitais) {
+                dados.evolucao = inserirVitaisNaEvolucao(dados.evolucao, dados.prontuario.sinais_vitais);
+            }
+
             // --- EXAMES COMPLEMENTARES (v7) ---
             // Trava: só existe se tiver conteúdo real (nada de rótulo vazio nem
             // de "não foram realizados"). NÃO depende de toggle nenhum.
@@ -3312,11 +3497,22 @@ ${mensagemPrompt}`;
             }
 
             // --- TRAVAS DE SEGURANÇA (servidor manda, não a IA) ---
-            if (!op.relatorio) dados.relatorio = '';
-            if (!exameUnidade) dados.exame_unidade = '';
-            if (!exameExterno) dados.exame_externo = '';
-            if (typeof dados.exame_unidade !== 'string') dados.exame_unidade = '';
-            if (typeof dados.exame_externo !== 'string') dados.exame_externo = '';
+            // v8.4 — REGRA GERAL: todo documento que depende de um toggle só
+            // existe com o toggle LIGADO. Antes só relatório e exames tinham
+            // trava; a prescrição da UPA dependia só do prompt, e escapou
+            // (ceftriaxona prescrita com o 💉 desligado). Agora a lista abaixo
+            // vale para todos, e quando a IA escreveu algo que foi descartado
+            // o médico é AVISADO (regra 15) — pode ter sido intencional.
+            const descartados = aplicarTravasDeToggle(dados, [
+                { campo: 'prescricao_interna', ligado: medicarUpa,   nome: '💉 Medicar na UPA' },
+                { campo: 'receita',            ligado: !!op.alta,    nome: '🏠 Receita' },
+                { campo: 'relatorio',          ligado: !!op.relatorio, nome: '📋 Relatório APS' },
+                { campo: 'exame_unidade',      ligado: exameUnidade, nome: '🔬 Exame na unidade' },
+                { campo: 'exame_externo',      ligado: exameExterno, nome: '🏥 Exame externo' }
+            ]);
+            if (descartados.length > 0) {
+                dados.discussao = (dados.discussao || '') + '\n\n' + avisoDescartePorToggle(descartados);
+            }
 
             // --- Rede de segurança farmacológica ---
             // v7.6: a prescrição de internação ENTRA na conferência — quem a
@@ -3964,10 +4160,10 @@ app.use((err, req, res, next) => {
 // QUAL versão está de fato rodando no Render. Serve para pegar o caso em que o
 // deploy falhou e o Render continuou servindo a versão anterior (o servidor
 // segue no ar, então nada parece errado — mas o código novo não está valendo).
-const VERSAO_SERVIDOR = 'v8.3';
+const VERSAO_SERVIDOR = 'v8.4';
 app.get('/', (req, res) => res.send(
     'Servidor do Prontuario Rapido ' + VERSAO_SERVIDOR + ' no ar. '
-    + 'Linhas esperadas no server.js: 3974.'
+    + 'Linhas esperadas no server.js: 4170.'
 ));
 
 const PORT = process.env.PORT || 3000;
