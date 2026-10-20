@@ -279,6 +279,14 @@
     .codigo-destaque{font-size:22px; letter-spacing:6px; font-weight:bold; display:block; margin-top:4px;}
     .ponte-row{display:flex; gap:8px; margin-top:10px; align-items:center; flex-wrap:wrap;}
     #codigoPonte{width:110px; text-align:center; font-weight:bold; letter-spacing:4px; font-size:16px;}
+    /* v8.5 — caixinha "Exame físico normal", logo abaixo do relato. */
+    .ef-linha{display:flex; align-items:flex-start; gap:8px; margin-top:6px;}
+    .ef-chk{display:flex; align-items:center; gap:5px; margin:6px 0 0; font-size:12.5px; white-space:nowrap; cursor:pointer;}
+    .ef-chk input{width:16px; height:16px; margin:0; accent-color:var(--verde);}
+    textarea#efAlteracoes{flex:1; min-width:0; min-height:66px; height:66px; padding:6px 8px; font-size:13px; line-height:1.4;}
+    .ef-padrao{white-space:pre-wrap; font-family:monospace; font-size:12px; background:var(--box);
+        border-left:3px solid var(--verde); padding:7px 9px; margin-top:4px; color:var(--texto);}
+    details.ef-ver summary{font-size:11px; color:var(--azul); cursor:pointer; margin-top:3px;}
 </style>
 </head>
 <body>
@@ -365,6 +373,16 @@
     <div class="field-mb">
         <label for="mensagem" id="lblMensagem">Relato Clínico ou Dúvida:</label>
         <textarea id="mensagem" placeholder="Paciente com cefaleia unilateral pulsátil há 6h..."></textarea>
+        <!-- v8.5 — só na aba Prontuário. Marcada por padrão; escrever no campo
+             desmarca. Ver RECURSOS_V85 no script para desligar esta função. -->
+        <div id="efWrap">
+            <div class="ef-linha">
+                <label class="ef-chk" for="chkEfNormal"><input type="checkbox" id="chkEfNormal" checked> Exame físico normal</label>
+                <textarea id="efAlteracoes" rows="3" placeholder="alterações do exame ou sinais vitais (ex.: PA 130x80, FC 98, sibilos difusos)"></textarea>
+            </div>
+            <div class="nota" id="efNota"></div>
+            <details class="ef-ver"><summary>ver o exame padrão</summary><div class="ef-padrao" id="efPadraoTxt"></div></details>
+        </div>
     </div>
 
     <!-- ANEXOS: fotos de documentos (exames, prontuários antigos, evoluções).
@@ -458,6 +476,7 @@
         <div class="modal-linha"><strong>Cérebro da IA:</strong> <span id="confModelo">—</span></div>
         <div class="modal-linha"><strong>Ligados:</strong> <span id="confToggles">—</span></div>
         <div class="modal-linha"><strong>Anexos:</strong> <span id="confAnexos">—</span></div>
+        <div class="modal-linha" id="confEfLinha"><strong>Exame físico:</strong> <span id="confEf">—</span></div>
         <div class="modal-botoes">
             <button class="modal-voltar" onclick="fecharConfirmacao()">✏️ Corrigir</button>
             <button class="modal-ok" onclick="confirmarEnvio()">✅ Confirmar e gerar</button>
@@ -601,6 +620,13 @@
     const API_URL = BASE_URL + '/api/atendimento';
 
     let tipoAtual = 'prontuario';
+
+    // v8.5 — CHAVES DE CADA FUNÇÃO NOVA. Trocar true por false desliga a
+    // função na tela (ela some e nada dela é enviado ao servidor), sem mexer
+    // em mais nada. É o jeito de voltar atrás numa função só.
+    const RECURSOS_V85 = {
+        exameFisicoNormal: true   // caixinha "Exame físico normal" + campo de alterações
+    };
 
     // ---- SENHA DE ACESSO ----
     // Pedida uma vez por plantão e guardada só na SESSÃO do navegador (some ao
@@ -896,6 +922,7 @@
         if(cx) cx.placeholder = ehInt
             ? 'Ex.: interno, mantenho ceftriaxona e a hidratação, dieta branda. (pode deixar vazio)'
             : 'Paciente com cefaleia unilateral pulsátil há 6h...';
+        atualizarEF();   // v8.5
     }
 
     // v8.1 — atalho do fim da tela: vai para a aba Internação mantendo o BE.
@@ -909,9 +936,43 @@
     }
 
     // ---- Limpar só o relato ----
+    // v8.5: também volta a caixinha do exame físico para "normal".
     function limpar(){
         document.getElementById('mensagem').value = '';
+        efLimpar();
         document.getElementById('mensagem').focus();
+    }
+
+    // ---- v8.5: caixinha "Exame físico normal" (só na aba Prontuário) ----
+    function efPadraoTexto(){
+        const a = document.getElementById('sexo').value === 'M' ? 'o' : 'a';
+        return 'BEG, orientad' + a + ' no tempo e no espaço, eupneic' + a + ', corad' + a + ', hidratad' + a + ', acianótic' + a + ', anictéric' + a + '\n'
+            + 'ACV: ritmo cardíaco regular em 2 tempos, bulhas normofonéticas, sem sopros\n'
+            + 'AR: MVF presente bilateralmente, sem RA\n'
+            + 'AD: plano, flácido, RHA presentes, indolor à palpação, sem massas ou visceromegalias\n'
+            + 'Neurológico: vigil, orientad' + a + ', sem déficits focais';
+    }
+    function atualizarEF(){
+        const wrap = document.getElementById('efWrap');
+        if(!wrap) return;
+        wrap.style.display = (RECURSOS_V85.exameFisicoNormal && tipoAtual === 'prontuario') ? 'block' : 'none';
+        const chk = document.getElementById('chkEfNormal').checked;
+        const alt = document.getElementById('efAlteracoes').value.trim();
+        document.getElementById('efNota').innerText = chk
+            ? 'Sai o exame normal padrão. Achado de exame escrito no relato também entra como alteração.'
+            : (alt ? 'Sai o padrão, trocando só o que as suas alterações contradizem. Sinais vitais vão para o quadro deles.'
+                   : 'Sem padrão: o exame sai só com o que estiver no relato.');
+        document.getElementById('efPadraoTxt').innerText = efPadraoTexto();
+    }
+    function efEnvio(){
+        if(!RECURSOS_V85.exameFisicoNormal || tipoAtual !== 'prontuario') return null;
+        return { padrao: document.getElementById('chkEfNormal').checked,
+                 alteracoes: document.getElementById('efAlteracoes').value.trim() };
+    }
+    function efLimpar(){
+        document.getElementById('chkEfNormal').checked = true;
+        document.getElementById('efAlteracoes').value = '';
+        atualizarEF();
     }
 
     function setBox(idDoc, idRes, texto){
@@ -1362,7 +1423,8 @@
                 medicarUpa: document.getElementById('chkMedicarUpa').checked,
                 exameUnidade: document.getElementById('chkExameUnidade').checked,
                 exameExterno: document.getElementById('chkExameExterno').checked
-            }
+            },
+            exameFisico: efEnvio()   // v8.5
         };
     }
 
@@ -1405,6 +1467,9 @@
         document.getElementById('confModelo').innerText  = rotuloModelo;
         document.getElementById('confToggles').innerText = nomesToggles.length ? nomesToggles.join(' · ') : 'nenhum';
         document.getElementById('confAnexos').innerText  = partesAnexo.length ? partesAnexo.join(' + ') : 'nenhum';
+        document.getElementById('confEfLinha').style.display = c.exameFisico ? 'block' : 'none';
+        if(c.exameFisico) document.getElementById('confEf').innerText = c.exameFisico.padrao
+            ? 'normal (padrão)' : (c.exameFisico.alteracoes ? 'padrão + suas alterações' : 'só o que está no relato');
 
         document.getElementById('modalConfirmar').classList.add('aberto');
     }
@@ -1433,6 +1498,7 @@
         const c = lerCamposEnvio();
         const beId = c.beId, mensagem = c.mensagem, unidade = c.unidade;
         const modeloId = c.modeloId, sexo = c.sexo, idade = c.idade, opcoes = c.opcoes;
+        const exameFisico = c.exameFisico;   // v8.5
         const btn = document.getElementById('btnEnviar');
 
         // Anexos: vão junto do pedido (tanto os deste aparelho quanto as fotos
@@ -1473,7 +1539,7 @@
                 method:'POST',
                 headers:{'Content-Type':'application/json'},
                 signal: controleEnvio.signal,
-                body: JSON.stringify({beId,mensagem,unidade,opcoes,modeloId,sexo,idade,tipoDocumento:tipoAtual,imagens})
+                body: JSON.stringify({beId,mensagem,unidade,opcoes,modeloId,sexo,idade,tipoDocumento:tipoAtual,imagens,exameFisico})
             });
             const data = await resp.json();
             if(data.erro){
@@ -1660,6 +1726,15 @@
     document.getElementById('codigoPonte').addEventListener('keydown', function(e){
         if(e.key === 'Enter'){ e.preventDefault(); receberPorCodigo(); }
     });
+
+    // v8.5 — escrever no campo de alterações desmarca a caixinha; apagar tudo remarca.
+    document.getElementById('efAlteracoes').addEventListener('input', function(){
+        document.getElementById('chkEfNormal').checked = this.value.trim() === '';
+        atualizarEF();
+    });
+    document.getElementById('chkEfNormal').addEventListener('change', atualizarEF);
+    document.getElementById('sexo').addEventListener('change', atualizarEF);
+    atualizarEF();
 
     if(!SENHA){ pedirSenha(); }
     carregarRecentes();

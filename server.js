@@ -1588,6 +1588,71 @@ function inserirVitaisNaEvolucao(evolucao, vitais) {
     return (antes ? antes + '\n' : '') + linha + '\n' + depois;
 }
 
+// v8.5 — CAIXINHA "EXAME FÍSICO NORMAL" (só na aba Prontuário).
+// A tela manda { padrao: true|false, alteracoes: "texto" } ou nada.
+//  • padrao = true  → o exame é o PADRÃO abaixo, escrito pelo SERVIDOR. A IA
+//    só escreve o exame se o RELATO trouxer achado de exame (aí ela devolve o
+//    padrão com a alteração aplicada). Sem achado no relato, ela deixa o campo
+//    vazio e o servidor põe o padrão — determinístico, nada inventado.
+//  • padrao = false com alterações → a IA parte do padrão e troca só o que a
+//    alteração contradiz; sinais vitais vão para o campo próprio.
+//  • padrao = false sem alterações → comportamento antigo (só o relato).
+// O texto do padrão é o MESMO que a tela mostra em "ver o exame padrão".
+function efPadraoServidor(sexo) {
+    const a = sexo === 'M' ? 'o' : 'a';
+    return 'BEG, orientad' + a + ' no tempo e no espaço, eupneic' + a + ', corad' + a + ', hidratad' + a
+        + ', acianótic' + a + ', anictéric' + a + '\n'
+        + 'ACV: ritmo cardíaco regular em 2 tempos, bulhas normofonéticas, sem sopros\n'
+        + 'AR: MVF presente bilateralmente, sem RA\n'
+        + 'AD: plano, flácido, RHA presentes, indolor à palpação, sem massas ou visceromegalias\n'
+        + 'Neurológico: vigil, orientad' + a + ', sem déficits focais';
+}
+
+function lerExameFisico(bruto, tipoDocumento) {
+    if (tipoDocumento === 'evolucao' || tipoDocumento === 'internacao') return null;
+    if (!bruto || typeof bruto !== 'object') return null;
+    const alteracoes = String(bruto.alteracoes || '').replace(/\s+$/g, '').slice(0, 1500).trim();
+    return { padrao: bruto.padrao === true && !alteracoes, alteracoes };
+}
+
+function blocoExameFisicoPrompt(ef, sexo) {
+    if (!ef || (!ef.padrao && !ef.alteracoes)) return '';
+    const regras = `REGRAS DE SUBSTITUIÇÃO:
+  1. SINAIS VITAIS (PA, FC, FR, SpO2, temperatura, glicemia capilar, peso) vão
+     SOMENTE no campo "sinais_vitais"; eles não mudam o texto do exame.
+  2. Achado que CONTRADIZ o padrão troca SÓ a linha (ou o trecho) que ele
+     contradiz. Ex.: sibilos são ruído adventício, então a linha AR vira
+     "AR: MV presente bilateralmente, com sibilos difusos". Fácies de dor
+     contradiz "BEG": retire o BEG e escreva o achado, SEM criar "REG" nem
+     qualquer grau que o médico não deu.
+  3. Achado de um segmento que NÃO existe no padrão (oroscopia, otoscopia,
+     pele, membros...) entra como LINHA NOVA no fim, com as palavras do médico,
+     sem acrescentar característica nenhuma.
+  4. As linhas que a alteração não toca ficam EXATAMENTE como no padrão,
+     palavra por palavra.
+  5. Continua valendo "EXAME FÍSICO — PODE CAPRICHAR, NÃO PODE INVENTAR".
+PADRÃO (uma linha por sistema, como está):
+${efPadraoServidor(sexo)}
+`;
+    if (ef.padrao) {
+        return `
+EXAME FÍSICO — O MÉDICO MARCOU "EXAME FÍSICO NORMAL":
+O exame deste paciente é o PADRÃO abaixo, e o SISTEMA o escreve sozinho.
+  • Se o RELATO NÃO descrever nenhum achado de exame físico: deixe
+    "exame_fisico_texto" VAZIO (""). Não copie o padrão.
+  • Se o RELATO descrever achado de exame físico: escreva em
+    "exame_fisico_texto" o padrão com esse achado aplicado, pelas regras abaixo.
+${regras}`;
+    }
+    return `
+EXAME FÍSICO — PADRÃO + ALTERAÇÕES DO MÉDICO:
+O médico escreveu estas alterações do exame (e/ou sinais vitais):
+«${ef.alteracoes}»
+Escreva em "exame_fisico_texto" o PADRÃO abaixo com essas alterações aplicadas
+(e também qualquer achado de exame que esteja no relato), pelas regras abaixo.
+${regras}`;
+}
+
 // Se um "CID: ..." vazou para dentro da conduta ou do exame físico (campos que
 // NÃO devem conter o CID, pois ele tem campo próprio), remove essa linha.
 // Conservador: só remove a LINHA que começa com "CID:" — não toca no resto.
@@ -2443,7 +2508,7 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
     });
 
     try {
-        const { beId, mensagem, unidade, opcoes, modeloId, sexo, idade, tipoDocumento, imagens } = req.body;
+        const { beId, mensagem, unidade, opcoes, modeloId, sexo, idade, tipoDocumento, imagens, exameFisico } = req.body;
 
         // v8.1: na ABA INTERNAÇÃO o relato é OPCIONAL — o caso já está no BE.
         // Nas outras abas continua obrigatório.
@@ -2488,6 +2553,10 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
             return res.status(400).json({ erro: 'Unidade inválida.' });
         }
         const op = opcoes || { prontuario: true, alta: false, relatorio: false, correcao: false };
+        // v8.5 — caixinha "Exame físico normal" (só prontuário). Vai junto das
+        // opções para ficar registrada no histórico e no banco de documentos.
+        const ef = lerExameFisico(exameFisico, tipoDocumento);
+        if (ef) op.exameFisico = ef;
 
         // NOVO: tipo de documento escolhido pelo médico (não mais adivinhado).
         //   'evolucao' = texto curto + conduta.  Qualquer outro valor = prontuário completo.
@@ -2920,7 +2989,7 @@ REGRA ABSOLUTA DE FIDELIDADE AO RELATO:
   • Na dúvida, escreva só o que o médico disse.
 
 ${contextoFarmacologico}
-${blocoFontes}${blocoFotos}${blocoInternacao}
+${blocoFontes}${blocoFotos}${blocoInternacao}${blocoExameFisicoPrompt(ef, sexo)}
 REGRAS DE SAÍDA (responda em JSON puro com EXATAMENTE estas chaves):
 {
   "discussao": "",
@@ -3421,6 +3490,23 @@ ${mensagemPrompt}`;
                 dados.prontuario.conduta = removerCidVazado(dados.prontuario.conduta);
                 dados.prontuario.exame_fisico_texto = removerCidVazado(dados.prontuario.exame_fisico_texto);
                 dados.prontuario.sinais_vitais = normalizarSeparadorVitais(dados.prontuario.sinais_vitais);
+            }
+
+            // --- v8.5: CAIXINHA "EXAME FÍSICO NORMAL" ---
+            // Campo vazio com a caixinha ligada = o relato não trouxe achado de
+            // exame: entra o padrão, escrito aqui (determinístico). Campo vazio
+            // com alterações escritas = a IA não as aplicou: entra o padrão e a
+            // discussão AVISA (regra 15), mostrando o que ficou de fora.
+            if (ef && dados.prontuario && (ef.padrao || ef.alteracoes)) {
+                const efTxt = String(dados.prontuario.exame_fisico_texto || '').trim();
+                if (!efTxt) {
+                    dados.prontuario.exame_fisico_texto = efPadraoServidor(sexo);
+                    if (!ef.padrao) {
+                        dados.discussao = (dados.discussao || '')
+                            + '\n\n⚠️ A IA NÃO aplicou as suas alterações do exame físico e saiu o exame padrão. '
+                            + 'Corrija à mão antes de registrar. O que você escreveu: «' + ef.alteracoes + '»';
+                    }
+                }
             }
 
             // --- v8.4: SINAIS VITAIS DENTRO DA EVOLUÇÃO, antes do exame ---
