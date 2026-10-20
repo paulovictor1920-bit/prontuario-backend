@@ -1227,6 +1227,15 @@ function textoDiluicao(reg, ehIM) {
     return partesDiluicao(reg, ehIM).join(' · ');
 }
 
+// v8.5 — a linha É um soro (SF, SG, Ringer, glicose): não tem diluição a
+// procurar. Antes ela caía em "DILUIÇÃO NÃO ENCONTRADA" — alarme falso que o
+// cardápio de soros tornaria frequente. Só olha o COMEÇO da linha (depois da
+// numeração), para não pular "Ceftriaxona ... em SF".
+function linhaEhSoro(linha) {
+    const t = semAcento(String(linha || '')).replace(/^\s*(?:\d{1,2}[.)]|[-•*])\s*/, '');
+    return /^(sf\b|sg\b|soro |solucao fisiolog|cloreto de sodio 0[,.]9|ringer|glicose \d|soro glicosado)/.test(t);
+}
+
 // Detecta se uma linha de texto parece conter uma medicação (tem mg, ml, etc).
 function pareceMedicacao(linha) {
     return /\d+\s*(mg|ml|mcg|g|ui|gota|comp|cp|amp|frasco)/i.test(linha);
@@ -1653,6 +1662,123 @@ Escreva em "exame_fisico_texto" o PADRÃO abaixo com essas alterações aplicada
 ${regras}`;
 }
 
+// v8.5 — CARDÁPIO DE MEDICAÇÕES DA UPA.
+// A tela manda [{id, linha}] com linhas de prescrição JÁ PRONTAS (dose exata
+// que o médico tocou). Quem as escreve na prescrição é o SERVIDOR; a IA só é
+// avisada de que existem, para citá-las na conduta e avaliá-las na discussão.
+// Se a IA escrever de novo uma droga do cardápio, a linha dela sai (nunca dose
+// dobrada) e, se a dose for diferente, a discussão AVISA mostrando a linha.
+// O teste de "mesma droga" olha só o COMEÇO da linha (é onde fica o nome do
+// remédio numa prescrição), para não confundir "diluir em SF" com soro.
+const CARDAPIO_PRINCIPIOS = {
+    dip: l => /^dipirona/.test(l),
+    pcm: l => /^paracetamol/.test(l) && !/codein/.test(l),
+    cod: l => /^(paracetamol.*codein|codein)/.test(l),
+    tram: l => /^tramadol/.test(l),
+    morf: l => /^morfina/.test(l),
+    sf: l => /^(sf\b|soro fisiolog|cloreto de sodio 0[,.]9|solucao fisiolog)/.test(l),
+    rl: l => /^(ringer|rl\b)/.test(l),
+    ceto: l => /^cetoprofeno/.test(l),
+    teno: l => /^tenoxicam/.test(l),
+    ibu: l => /^ibuprofeno/.test(l),
+    dexa: l => /^dexametasona/.test(l),
+    hidro: l => /^hidrocortisona/.test(l),
+    meto: l => /^metoclopramida/.test(l),
+    bromo: l => /^bromoprida/.test(l),
+    ondan: l => /^ondansetrona/.test(l),
+    esco: l => /^(escopolamina|butilbrometo|hioscina)/.test(l),
+    ome: l => /^omeprazol/.test(l),
+    glic: l => /^(glicerina|clister)/.test(l),
+    lactu: l => /^lactulose/.test(l),
+    cefx: l => /^ceftriaxona/.test(l),
+    amc: l => /^amoxicilina.*clavul/.test(l),
+    azi: l => /^azitromicina/.test(l),
+    clin: l => /^clindamicina/.test(l),
+    cipro: l => /^ciprofloxacino/.test(l),
+    cefa: l => /^cefalexina/.test(l),
+    metro: l => /^metronidazol/.test(l),
+    fluco: l => /^fluconazol/.test(l),
+    pep: l => /^(tenofovir|lamivudina|dolutegravir|profilaxia pos)/.test(l),
+    halo: l => /^haloperidol/.test(l),
+    clona: l => /^clonazepam/.test(l),
+    prome: l => /^prometazina/.test(l),
+    diaz: l => /^diazepam/.test(l),
+    mida: l => /^midazolam/.test(l),
+    clorp: l => /^clorpromazina/.test(l),
+    bronco: l => /^(salbutamol|ipratropio|fenoterol|inalacao|inalar)/.test(l),
+    o2: l => /^(oxigen|o2\b|cateter nasal)/.test(l),
+    aas: l => /^(aas\b|acido acetilsalicilico)/.test(l),
+    clopi: l => /^clopidogrel/.test(l)
+};
+const NUMERACAO_ITEM = /^\s*(?:\d{1,2}[.)]|[-•*])\s*/;
+
+// Lê e limpa o que a tela mandou. No máximo 40 itens, 3 linhas por item.
+function lerCardapio(bruto) {
+    if (!Array.isArray(bruto)) return [];
+    const itens = [];
+    bruto.slice(0, 40).forEach(it => {
+        if (!it || typeof it.linha !== 'string') return;
+        const linhas = it.linha.split('\n').map(l => l.replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 3)
+            .map(l => l.slice(0, 400));
+        if (!linhas.length) return;
+        itens.push({ id: String(it.id || '').slice(0, 20), linhas });
+    });
+    return itens;
+}
+
+function blocoCardapioPrompt(itens) {
+    if (!itens.length) return '';
+    const lista = itens.map(i => i.linhas.map(l => '  - ' + l).join('\n')).join('\n');
+    return `
+PRESCRIÇÃO NA UPA JÁ ESCOLHIDA PELO MÉDICO NO CARDÁPIO (o SISTEMA escreve estas
+linhas na prescrição, exatamente assim):
+${lista}
+REGRAS DO CARDÁPIO:
+  1. NÃO repita nenhuma dessas medicações em "prescricao_interna". Ali vai SÓ o
+     que o RELATO pedir A MAIS. Se não houver nada a mais, deixe-a vazia ("").
+  2. Elas SÃO prescrição do médico: cite-as na conduta (no item da medicação
+     na UPA) e avalie-as no bloco "SOBRE A SUA CONDUTA".
+  3. Se o relato pedir uma destas drogas com DOSE DIFERENTE, não escreva a outra
+     dose: aponte a diferença em uma linha na discussão.
+`;
+}
+
+// Doses da linha como "número + unidade" ("1 g", "2 ampola", "40 gota"), para
+// comparar a linha da IA com a do cardápio sem confundir "2 g" com "2 mL".
+function dosesDaLinha(l) {
+    const re = /(\d+(?:[.,]\d+)?)\s*(mg|mcg|g|ml|ui|gotas?|comprimidos?|capsulas?|ampolas?|frascos?|jatos?|bolsas?)(?![a-z])/g;
+    const out = [];
+    let m;
+    const t = semAcento(l);
+    while ((m = re.exec(t))) out.push(m[1].replace(',', '.') + ' ' + m[2].replace(/s$/, ''));
+    return out;
+}
+
+// Junta cardápio + o que a IA escreveu a mais. Devolve o texto numerado, as
+// linhas da IA que ficaram (só elas passam pela conferência da padronização:
+// as do cardápio vêm da lista da própria unidade) e os avisos.
+function mesclarCardapio(textoIA, itens) {
+    const linhasCard = [];
+    itens.forEach(i => i.linhas.forEach(l => linhasCard.push({ id: i.id, linha: l })));
+    const extras = [], avisos = [];
+    String(textoIA || '').split('\n').forEach(bruta => {
+        const linha = bruta.replace(NUMERACAO_ITEM, '').trim();
+        if (!linha) return;
+        const chave = semAcento(linha).trim();
+        const dono = itens.find(i => CARDAPIO_PRINCIPIOS[i.id] && CARDAPIO_PRINCIPIOS[i.id](chave));
+        if (!dono) { extras.push(linha); return; }
+        const dosesCard = new Set([].concat(...dono.linhas.map(dosesDaLinha)));
+        const igual = dosesDaLinha(linha).every(n => dosesCard.has(n));
+        if (!igual) avisos.push(linha);
+    });
+    const todas = linhasCard.map(x => x.linha).concat(extras);
+    return {
+        texto: todas.map((l, k) => (k + 1) + '. ' + l).join('\n'),
+        extras,
+        avisos
+    };
+}
+
 // Se um "CID: ..." vazou para dentro da conduta ou do exame físico (campos que
 // NÃO devem conter o CID, pois ele tem campo próprio), remove essa linha.
 // Conservador: só remove a LINHA que começa com "CID:" — não toca no resto.
@@ -1788,6 +1914,10 @@ function montarDiluicoes(textoPrescricao) {
         // só interessa o que é injetável (EV/IM/ampola/frasco/injetável)
         const ehInjetavel = /(ampola|frasco|injet|endoven|\bev\b|\bim\b|intramuscular|intravenos)/i.test(minus);
         if (!pareceMedicacao(linha) || !ehInjetavel) return;
+        // v8.5: o médico já ditou o preparo nesta linha (ex.: morfina do
+        // cardápio, "diluir 1 ampola em 9 mL"): vale o dele, como no Acrízio.
+        if (/dilu|reconstitu/.test(minus)) return;
+        if (linhaEhSoro(linha)) return;
 
         const reg = buscarDiluicao(linha);
         if (reg && reg.viaIncompativel) {
@@ -1850,6 +1980,7 @@ function anexarDiluicaoInline(textoPrescricao) {
 
         // O médico já ditou a diluição nesta linha? Então respeita e não mexe.
         if (/dilu|reconstitu/.test(minus)) return linha;
+        if (linhaEhSoro(linha)) return linha;   // v8.5: a linha é o próprio soro
 
         const reg = buscarDiluicao(linha);
         if (!reg) {
@@ -2508,7 +2639,7 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
     });
 
     try {
-        const { beId, mensagem, unidade, opcoes, modeloId, sexo, idade, tipoDocumento, imagens, exameFisico } = req.body;
+        const { beId, mensagem, unidade, opcoes, modeloId, sexo, idade, tipoDocumento, imagens, exameFisico, cardapio } = req.body;
 
         // v8.1: na ABA INTERNAÇÃO o relato é OPCIONAL — o caso já está no BE.
         // Nas outras abas continua obrigatório.
@@ -2557,6 +2688,9 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
         // opções para ficar registrada no histórico e no banco de documentos.
         const ef = lerExameFisico(exameFisico, tipoDocumento);
         if (ef) op.exameFisico = ef;
+        // v8.5 — cardápio de medicações (linhas prontas da tela).
+        const cardapioItens = lerCardapio(cardapio);
+        if (cardapioItens.length) op.cardapio = cardapioItens.map(i => i.linhas.join(' / '));
 
         // NOVO: tipo de documento escolhido pelo médico (não mais adivinhado).
         //   'evolucao' = texto curto + conduta.  Qualquer outro valor = prontuário completo.
@@ -2566,7 +2700,8 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
 
         // NOVO: o médico decide se haverá medicação NA UPA (toggle). Desligado por
         //   padrão: a IA NÃO deve criar prescrição interna se isto vier falso.
-        const medicarUpa = op.medicarUpa === true;
+        // v8.5: escolher algo no cardápio já é decidir medicar na UPA.
+        const medicarUpa = op.medicarUpa === true || cardapioItens.length > 0;
 
         // Ponto 2: o médico pode ligar a "busca em fontes confiáveis" caso a caso.
         // v8.0 (fatia O.3): a busca é uma ferramenta do GEMINI. O Claude não tem
@@ -2989,7 +3124,7 @@ REGRA ABSOLUTA DE FIDELIDADE AO RELATO:
   • Na dúvida, escreva só o que o médico disse.
 
 ${contextoFarmacologico}
-${blocoFontes}${blocoFotos}${blocoInternacao}${blocoExameFisicoPrompt(ef, sexo)}
+${blocoFontes}${blocoFotos}${blocoInternacao}${blocoExameFisicoPrompt(ef, sexo)}${blocoCardapioPrompt(cardapioItens)}
 REGRAS DE SAÍDA (responda em JSON puro com EXATAMENTE estas chaves):
 {
   "discussao": "",
@@ -3600,6 +3735,22 @@ ${mensagemPrompt}`;
                 dados.discussao = (dados.discussao || '') + '\n\n' + avisoDescartePorToggle(descartados);
             }
 
+            // --- v8.5: CARDÁPIO entra na prescrição da UPA (o servidor escreve) ---
+            // Linhas do cardápio primeiro, depois o que a IA acrescentou a
+            // partir do relato. Droga repetida não dobra: a linha da IA sai e,
+            // se a dose era diferente, a discussão avisa (regra 15).
+            let extrasIA = null;
+            if (cardapioItens.length) {
+                const mix = mesclarCardapio(dados.prescricao_interna, cardapioItens);
+                dados.prescricao_interna = mix.texto;
+                extrasIA = mix.extras.join('\n');
+                if (mix.avisos.length) {
+                    dados.discussao = (dados.discussao || '') + '\n\n🔁 A IA também escreveu, a partir do relato, uma droga que já estava no cardápio. '
+                        + 'Ficou só a linha do cardápio. Confira se a dose é a que você quer — a linha descartada foi:\n- '
+                        + mix.avisos.join('\n- ');
+                }
+            }
+
             // --- Rede de segurança farmacológica ---
             // v7.6: a prescrição de internação ENTRA na conferência — quem a
             // executa enquanto a vaga não sai é a equipe desta mesma UPA.
@@ -3608,7 +3759,8 @@ ${mensagemPrompt}`;
             // padronização era ruído garantido em toda receita, e o médico já
             // sabe. Continuam conferidas as duas prescrições EXECUTADAS DENTRO
             // da unidade, onde a informação ainda serve para alguma coisa.
-            const textoConferir = [dados.prescricao_interna,
+            // v8.5: linhas do cardápio não são conferidas (vêm da lista da unidade).
+            const textoConferir = [extrasIA !== null ? extrasIA : dados.prescricao_interna,
                 dados.prescricao_internacao].filter(Boolean).join('\n');
             const alertas = conferirMedicamentos(textoConferir, listaUnidade);
             if (alertas.length > 0) {
