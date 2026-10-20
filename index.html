@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <!--
-  PRONTUÁRIO RÁPIDO - TELA (FRONTEND) - v8.5 - 19/out/2026
+  PRONTUÁRIO RÁPIDO - TELA (FRONTEND) - v8.6 - 20/out/2026
+  v8.6: cardápio ganhou "Azitromicina 2 cp (1 g)". O resto da v8.6 é servidor.
   Novidades da v8.5 (cada uma pode ser desligada em RECURSOS_V85, no script):
    1) Caixinha "Exame físico normal" abaixo do relato (só na aba Prontuário),
       marcada por padrão, com campo de 3 linhas para alterações e sinais
@@ -1897,7 +1898,9 @@
         {id:'amc', n:'Amoxicilina + clavulanato', c:'atb', A:{vias:{
             VO:[cdL('1 cp 500/125','Amoxicilina 500 mg + clavulanato 125 mg — 1 comprimido VO agora.')],
             EV:[cdL('1 frasco (1 g/200 mg)','Amoxicilina 1 g + clavulanato 200 mg — 1 frasco-ampola EV agora.')]}}},
-        {id:'azi', n:'Azitromicina', c:'atb', A:{vias:{VO:[cdL('1 cp 500','Azitromicina 500 mg — 1 comprimido VO agora.')]}}},
+        {id:'azi', n:'Azitromicina', c:'atb', A:{vias:{VO:[
+            cdL('1 cp 500','Azitromicina 500 mg — 1 comprimido VO agora.'),
+            cdL('2 cp (1 g)','Azitromicina 500 mg — 2 comprimidos (1 g) VO agora.')]}}},
         {id:'clin', n:'Clindamicina', c:'atb', A:{vias:{EV:[cdL('1 ampola (600 mg)','Clindamicina 600 mg/4 mL — 1 ampola EV agora.')]}}, B:null},
         {id:'cipro', n:'Ciprofloxacino', c:'atb', A:{vias:{VO:[cdL('1 cp 500','Ciprofloxacino 500 mg — 1 comprimido VO agora.')]}}},
         {id:'cefa', n:'Cefalexina', c:'atb', A:{vias:{VO:[
