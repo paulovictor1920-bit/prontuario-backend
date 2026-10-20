@@ -1,5 +1,17 @@
 // ============================================================================
-//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v8.4
+//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v8.5
+//
+//  v8.5 (19/out/2026) — TRÊS FUNÇÕES PARA GANHAR TEMPO NA FICHA VERDE.
+//    Cada uma num commit próprio, para poder voltar atrás em uma só:
+//    1) CAIXINHA "EXAME FÍSICO NORMAL" (só prontuário): marcada, o exame sai
+//       no padrão escrito pelo servidor; com alterações, a IA troca só o que
+//       elas contradizem. Ver efPadraoServidor / blocoExameFisicoPrompt.
+//    2) CARDÁPIO DE MEDICAÇÕES: a tela manda linhas prontas e o servidor as
+//       escreve na prescrição da UPA; a IA só acrescenta o que o relato pedir
+//       a mais. Droga repetida não dobra. Ver mesclarCardapio.
+//    3) 🔬 vira SUGESTÃO de exames na discussão (obrigatórios / ajudam muito /
+//       dispensáveis) e o 🏥 pedido externo passa a ter CID-10 obrigatório.
+//    Para desligar 1 ou 2 sem mexer no servidor: RECURSOS_V85 no index.html.
 //
 //  v8.4 (15/out/2026) — CORREÇÕES DA PRIMEIRA REVISÃO DE PLANTÃO PELO BANCO.
 //    Pedidas pelo médico depois da revisão do plantão de 14→15/out, sempre
@@ -1227,6 +1239,15 @@ function textoDiluicao(reg, ehIM) {
     return partesDiluicao(reg, ehIM).join(' · ');
 }
 
+// v8.5 — a linha É um soro (SF, SG, Ringer, glicose): não tem diluição a
+// procurar. Antes ela caía em "DILUIÇÃO NÃO ENCONTRADA" — alarme falso que o
+// cardápio de soros tornaria frequente. Só olha o COMEÇO da linha (depois da
+// numeração), para não pular "Ceftriaxona ... em SF".
+function linhaEhSoro(linha) {
+    const t = semAcento(String(linha || '')).replace(/^\s*(?:\d{1,2}[.)]|[-•*])\s*/, '');
+    return /^(sf\b|sg\b|soro |solucao fisiolog|cloreto de sodio 0[,.]9|ringer|glicose \d|soro glicosado)/.test(t);
+}
+
 // Detecta se uma linha de texto parece conter uma medicação (tem mg, ml, etc).
 function pareceMedicacao(linha) {
     return /\d+\s*(mg|ml|mcg|g|ui|gota|comp|cp|amp|frasco)/i.test(linha);
@@ -1588,6 +1609,188 @@ function inserirVitaisNaEvolucao(evolucao, vitais) {
     return (antes ? antes + '\n' : '') + linha + '\n' + depois;
 }
 
+// v8.5 — CAIXINHA "EXAME FÍSICO NORMAL" (só na aba Prontuário).
+// A tela manda { padrao: true|false, alteracoes: "texto" } ou nada.
+//  • padrao = true  → o exame é o PADRÃO abaixo, escrito pelo SERVIDOR. A IA
+//    só escreve o exame se o RELATO trouxer achado de exame (aí ela devolve o
+//    padrão com a alteração aplicada). Sem achado no relato, ela deixa o campo
+//    vazio e o servidor põe o padrão — determinístico, nada inventado.
+//  • padrao = false com alterações → a IA parte do padrão e troca só o que a
+//    alteração contradiz; sinais vitais vão para o campo próprio.
+//  • padrao = false sem alterações → comportamento antigo (só o relato).
+// O texto do padrão é o MESMO que a tela mostra em "ver o exame padrão".
+function efPadraoServidor(sexo) {
+    const a = sexo === 'M' ? 'o' : 'a';
+    return 'BEG, orientad' + a + ' no tempo e no espaço, eupneic' + a + ', corad' + a + ', hidratad' + a
+        + ', acianótic' + a + ', anictéric' + a + '\n'
+        + 'ACV: ritmo cardíaco regular em 2 tempos, bulhas normofonéticas, sem sopros\n'
+        + 'AR: MVF presente bilateralmente, sem RA\n'
+        + 'AD: plano, flácido, RHA presentes, indolor à palpação, sem massas ou visceromegalias\n'
+        + 'Neurológico: vigil, orientad' + a + ', sem déficits focais';
+}
+
+function lerExameFisico(bruto, tipoDocumento) {
+    if (tipoDocumento === 'evolucao' || tipoDocumento === 'internacao') return null;
+    if (!bruto || typeof bruto !== 'object') return null;
+    const alteracoes = String(bruto.alteracoes || '').replace(/\s+$/g, '').slice(0, 1500).trim();
+    return { padrao: bruto.padrao === true && !alteracoes, alteracoes };
+}
+
+function blocoExameFisicoPrompt(ef, sexo) {
+    if (!ef || (!ef.padrao && !ef.alteracoes)) return '';
+    const regras = `REGRAS DE SUBSTITUIÇÃO:
+  1. SINAIS VITAIS (PA, FC, FR, SpO2, temperatura, glicemia capilar, peso) vão
+     SOMENTE no campo "sinais_vitais"; eles não mudam o texto do exame.
+  2. Achado que CONTRADIZ o padrão troca SÓ a linha (ou o trecho) que ele
+     contradiz. Ex.: sibilos são ruído adventício, então a linha AR vira
+     "AR: MV presente bilateralmente, com sibilos difusos". Fácies de dor
+     contradiz "BEG": retire o BEG e escreva o achado, SEM criar "REG" nem
+     qualquer grau que o médico não deu.
+  3. Achado de um segmento que NÃO existe no padrão (oroscopia, otoscopia,
+     pele, membros...) entra como LINHA NOVA no fim, com as palavras do médico,
+     sem acrescentar característica nenhuma.
+  4. As linhas que a alteração não toca ficam EXATAMENTE como no padrão,
+     palavra por palavra.
+  5. Continua valendo "EXAME FÍSICO — PODE CAPRICHAR, NÃO PODE INVENTAR".
+PADRÃO (uma linha por sistema, como está):
+${efPadraoServidor(sexo)}
+`;
+    if (ef.padrao) {
+        return `
+EXAME FÍSICO — O MÉDICO MARCOU "EXAME FÍSICO NORMAL":
+O exame deste paciente é o PADRÃO abaixo, e o SISTEMA o escreve sozinho.
+  • Se o RELATO NÃO descrever nenhum achado de exame físico: deixe
+    "exame_fisico_texto" VAZIO (""). Não copie o padrão.
+  • Se o RELATO descrever achado de exame físico: escreva em
+    "exame_fisico_texto" o padrão com esse achado aplicado, pelas regras abaixo.
+${regras}`;
+    }
+    return `
+EXAME FÍSICO — PADRÃO + ALTERAÇÕES DO MÉDICO:
+O médico escreveu estas alterações do exame (e/ou sinais vitais):
+«${ef.alteracoes}»
+Escreva em "exame_fisico_texto" o PADRÃO abaixo com essas alterações aplicadas
+(e também qualquer achado de exame que esteja no relato), pelas regras abaixo.
+${regras}`;
+}
+
+// v8.5 — CARDÁPIO DE MEDICAÇÕES DA UPA.
+// A tela manda [{id, linha}] com linhas de prescrição JÁ PRONTAS (dose exata
+// que o médico tocou). Quem as escreve na prescrição é o SERVIDOR; a IA só é
+// avisada de que existem, para citá-las na conduta e avaliá-las na discussão.
+// Se a IA escrever de novo uma droga do cardápio, a linha dela sai (nunca dose
+// dobrada) e, se a dose for diferente, a discussão AVISA mostrando a linha.
+// O teste de "mesma droga" olha só o COMEÇO da linha (é onde fica o nome do
+// remédio numa prescrição), para não confundir "diluir em SF" com soro.
+const CARDAPIO_PRINCIPIOS = {
+    dip: l => /^dipirona/.test(l),
+    pcm: l => /^paracetamol/.test(l) && !/codein/.test(l),
+    cod: l => /^(paracetamol.*codein|codein)/.test(l),
+    tram: l => /^tramadol/.test(l),
+    morf: l => /^morfina/.test(l),
+    sf: l => /^(sf\b|soro fisiolog|cloreto de sodio 0[,.]9|solucao fisiolog)/.test(l),
+    rl: l => /^(ringer|rl\b)/.test(l),
+    ceto: l => /^cetoprofeno/.test(l),
+    teno: l => /^tenoxicam/.test(l),
+    ibu: l => /^ibuprofeno/.test(l),
+    dexa: l => /^dexametasona/.test(l),
+    hidro: l => /^hidrocortisona/.test(l),
+    meto: l => /^metoclopramida/.test(l),
+    bromo: l => /^bromoprida/.test(l),
+    ondan: l => /^ondansetrona/.test(l),
+    esco: l => /^(escopolamina|butilbrometo|hioscina)/.test(l),
+    ome: l => /^omeprazol/.test(l),
+    glic: l => /^(glicerina|clister)/.test(l),
+    lactu: l => /^lactulose/.test(l),
+    cefx: l => /^ceftriaxona/.test(l),
+    amc: l => /^amoxicilina.*clavul/.test(l),
+    azi: l => /^azitromicina/.test(l),
+    clin: l => /^clindamicina/.test(l),
+    cipro: l => /^ciprofloxacino/.test(l),
+    cefa: l => /^cefalexina/.test(l),
+    metro: l => /^metronidazol/.test(l),
+    fluco: l => /^fluconazol/.test(l),
+    pep: l => /^(tenofovir|lamivudina|dolutegravir|profilaxia pos)/.test(l),
+    halo: l => /^haloperidol/.test(l),
+    clona: l => /^clonazepam/.test(l),
+    prome: l => /^prometazina/.test(l),
+    diaz: l => /^diazepam/.test(l),
+    mida: l => /^midazolam/.test(l),
+    clorp: l => /^clorpromazina/.test(l),
+    bronco: l => /^(salbutamol|ipratropio|fenoterol|inalacao|inalar)/.test(l),
+    o2: l => /^(oxigen|o2\b|cateter nasal)/.test(l),
+    aas: l => /^(aas\b|acido acetilsalicilico)/.test(l),
+    clopi: l => /^clopidogrel/.test(l)
+};
+const NUMERACAO_ITEM = /^\s*(?:\d{1,2}[.)]|[-•*])\s*/;
+
+// Lê e limpa o que a tela mandou. No máximo 40 itens, 3 linhas por item.
+function lerCardapio(bruto) {
+    if (!Array.isArray(bruto)) return [];
+    const itens = [];
+    bruto.slice(0, 40).forEach(it => {
+        if (!it || typeof it.linha !== 'string') return;
+        const linhas = it.linha.split('\n').map(l => l.replace(/\s+/g, ' ').trim()).filter(Boolean).slice(0, 3)
+            .map(l => l.slice(0, 400));
+        if (!linhas.length) return;
+        itens.push({ id: String(it.id || '').slice(0, 20), linhas });
+    });
+    return itens;
+}
+
+function blocoCardapioPrompt(itens) {
+    if (!itens.length) return '';
+    const lista = itens.map(i => i.linhas.map(l => '  - ' + l).join('\n')).join('\n');
+    return `
+PRESCRIÇÃO NA UPA JÁ ESCOLHIDA PELO MÉDICO NO CARDÁPIO (o SISTEMA escreve estas
+linhas na prescrição, exatamente assim):
+${lista}
+REGRAS DO CARDÁPIO:
+  1. NÃO repita nenhuma dessas medicações em "prescricao_interna". Ali vai SÓ o
+     que o RELATO pedir A MAIS. Se não houver nada a mais, deixe-a vazia ("").
+  2. Elas SÃO prescrição do médico: cite-as na conduta (no item da medicação
+     na UPA) e avalie-as no bloco "SOBRE A SUA CONDUTA".
+  3. Se o relato pedir uma destas drogas com DOSE DIFERENTE, não escreva a outra
+     dose: aponte a diferença em uma linha na discussão.
+`;
+}
+
+// Doses da linha como "número + unidade" ("1 g", "2 ampola", "40 gota"), para
+// comparar a linha da IA com a do cardápio sem confundir "2 g" com "2 mL".
+function dosesDaLinha(l) {
+    const re = /(\d+(?:[.,]\d+)?)\s*(mg|mcg|g|ml|ui|gotas?|comprimidos?|capsulas?|ampolas?|frascos?|jatos?|bolsas?)(?![a-z])/g;
+    const out = [];
+    let m;
+    const t = semAcento(l);
+    while ((m = re.exec(t))) out.push(m[1].replace(',', '.') + ' ' + m[2].replace(/s$/, ''));
+    return out;
+}
+
+// Junta cardápio + o que a IA escreveu a mais. Devolve o texto numerado, as
+// linhas da IA que ficaram (só elas passam pela conferência da padronização:
+// as do cardápio vêm da lista da própria unidade) e os avisos.
+function mesclarCardapio(textoIA, itens) {
+    const linhasCard = [];
+    itens.forEach(i => i.linhas.forEach(l => linhasCard.push({ id: i.id, linha: l })));
+    const extras = [], avisos = [];
+    String(textoIA || '').split('\n').forEach(bruta => {
+        const linha = bruta.replace(NUMERACAO_ITEM, '').trim();
+        if (!linha) return;
+        const chave = semAcento(linha).trim();
+        const dono = itens.find(i => CARDAPIO_PRINCIPIOS[i.id] && CARDAPIO_PRINCIPIOS[i.id](chave));
+        if (!dono) { extras.push(linha); return; }
+        const dosesCard = new Set([].concat(...dono.linhas.map(dosesDaLinha)));
+        const igual = dosesDaLinha(linha).every(n => dosesCard.has(n));
+        if (!igual) avisos.push(linha);
+    });
+    const todas = linhasCard.map(x => x.linha).concat(extras);
+    return {
+        texto: todas.map((l, k) => (k + 1) + '. ' + l).join('\n'),
+        extras,
+        avisos
+    };
+}
+
 // Se um "CID: ..." vazou para dentro da conduta ou do exame físico (campos que
 // NÃO devem conter o CID, pois ele tem campo próprio), remove essa linha.
 // Conservador: só remove a LINHA que começa com "CID:" — não toca no resto.
@@ -1723,6 +1926,10 @@ function montarDiluicoes(textoPrescricao) {
         // só interessa o que é injetável (EV/IM/ampola/frasco/injetável)
         const ehInjetavel = /(ampola|frasco|injet|endoven|\bev\b|\bim\b|intramuscular|intravenos)/i.test(minus);
         if (!pareceMedicacao(linha) || !ehInjetavel) return;
+        // v8.5: o médico já ditou o preparo nesta linha (ex.: morfina do
+        // cardápio, "diluir 1 ampola em 9 mL"): vale o dele, como no Acrízio.
+        if (/dilu|reconstitu/.test(minus)) return;
+        if (linhaEhSoro(linha)) return;
 
         const reg = buscarDiluicao(linha);
         if (reg && reg.viaIncompativel) {
@@ -1785,6 +1992,7 @@ function anexarDiluicaoInline(textoPrescricao) {
 
         // O médico já ditou a diluição nesta linha? Então respeita e não mexe.
         if (/dilu|reconstitu/.test(minus)) return linha;
+        if (linhaEhSoro(linha)) return linha;   // v8.5: a linha é o próprio soro
 
         const reg = buscarDiluicao(linha);
         if (!reg) {
@@ -2443,7 +2651,7 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
     });
 
     try {
-        const { beId, mensagem, unidade, opcoes, modeloId, sexo, idade, tipoDocumento, imagens } = req.body;
+        const { beId, mensagem, unidade, opcoes, modeloId, sexo, idade, tipoDocumento, imagens, exameFisico, cardapio } = req.body;
 
         // v8.1: na ABA INTERNAÇÃO o relato é OPCIONAL — o caso já está no BE.
         // Nas outras abas continua obrigatório.
@@ -2488,6 +2696,13 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
             return res.status(400).json({ erro: 'Unidade inválida.' });
         }
         const op = opcoes || { prontuario: true, alta: false, relatorio: false, correcao: false };
+        // v8.5 — caixinha "Exame físico normal" (só prontuário). Vai junto das
+        // opções para ficar registrada no histórico e no banco de documentos.
+        const ef = lerExameFisico(exameFisico, tipoDocumento);
+        if (ef) op.exameFisico = ef;
+        // v8.5 — cardápio de medicações (linhas prontas da tela).
+        const cardapioItens = lerCardapio(cardapio);
+        if (cardapioItens.length) op.cardapio = cardapioItens.map(i => i.linhas.join(' / '));
 
         // NOVO: tipo de documento escolhido pelo médico (não mais adivinhado).
         //   'evolucao' = texto curto + conduta.  Qualquer outro valor = prontuário completo.
@@ -2497,7 +2712,8 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
 
         // NOVO: o médico decide se haverá medicação NA UPA (toggle). Desligado por
         //   padrão: a IA NÃO deve criar prescrição interna se isto vier falso.
-        const medicarUpa = op.medicarUpa === true;
+        // v8.5: escolher algo no cardápio já é decidir medicar na UPA.
+        const medicarUpa = op.medicarUpa === true || cardapioItens.length > 0;
 
         // Ponto 2: o médico pode ligar a "busca em fontes confiáveis" caso a caso.
         // v8.0 (fatia O.3): a busca é uma ferramenta do GEMINI. O Claude não tem
@@ -2611,10 +2827,16 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
         // linha "NÃO gere...". Instrução negativa ocupa atenção e não produz
         // nada. A trava do servidor (que zera o campo) continua valendo.
         if (exameUnidade) {
-            instrucoesAcao += '- PEDIDO DE EXAME (NA UNIDADE): redija no campo "exame_unidade" o texto do(s) exame(s) a serem realizados AQUI na UPA, conforme o comando do médico. Se ele indicou quais exames, formate-os; se ele perguntou quais você pediria, escolha os pertinentes ao caso e liste-os de forma assertiva.\n';
+            // v8.5: o 🔬 deixou de gerar pedido. Agora ele pede uma SUGESTÃO de
+            // exames, em três níveis, dentro da discussão.
+            instrucoesAcao += '- SUGESTÃO DE EXAMES (o médico ligou 🔬): NÃO escreva pedido de exame. Na "discussao", logo depois do bloco "SOBRE A SUA CONDUTA", '
+                + 'acrescente um bloco com o rótulo exato "EXAMES PARA ESTE CASO:" em três listas curtas, cada exame com o motivo em poucas palavras: '
+                + '"Obrigatórios:" (sem eles a conduta fica insegura), "Não obrigatórios, mas ajudam muito:" e "Dispensáveis:" (os que costumam ser '
+                + 'pedidos neste quadro mas não mudam a conduta aqui). Lista vazia vira "nenhum". Marque com "(externo)" o exame que a UPA não faz. '
+                + 'Nada de cultura (as unidades não coletam). Exame cujo resultado já está no relato não entra.\n';
         }
         if (exameExterno) {
-            instrucoesAcao += '- PEDIDO DE EXAME (EXTERNO): redija no campo "exame_externo" o texto de solicitação de exame(s) para o paciente realizar em serviço externo (clínica/laboratório particular ou referência), no formato que um médico usaria num pedido. Se o médico indicou o exame, formate-o; se ele perguntou quais pediria, escolha os pertinentes.\n';
+            instrucoesAcao += '- PEDIDO DE EXAME (EXTERNO): redija no campo "exame_externo" o pedido do(s) exame(s) que o paciente vai fazer FORA da unidade, no formato do item 8, SEMPRE com o CID-10 da investigação deste caso. Se o médico indicou o exame, use o dele; se perguntou quais pediria, escolha os pertinentes.\n';
         }
 
         // Ponto 2: bloco de fontes confiáveis (só entra no prompt se busca ligada).
@@ -2654,27 +2876,34 @@ e prossiga com conhecimento geral, sinalizando que não houve fonte confirmada.
         // Cada bloco condicional COMEÇA com vírgula e NÃO termina com vírgula,
         // para o esquema continuar sendo JSON válido em qualquer combinação de
         // toggles (inclusive todos desligados).
-        const chavesExames = (exameUnidade ? ',\n  "exame_unidade": ""' : '')
-                           + (exameExterno ? ',\n  "exame_externo": ""' : '');
+        // v8.5: "exame_unidade" saiu do esquema (o 🔬 agora só sugere na discussão).
+        const chavesExames = exameExterno ? ',\n  "exame_externo": ""' : '';
         const chaveFontes = usarBusca ? ',\n  "fontes": ""' : '';
 
         // v8.0 (fatia O.1): os itens do dicionário de campos dos pedidos de
         // exame só entram no prompt quando o toggle correspondente está ligado.
-        const itemExameUnidade = !exameUnidade ? '' : `7. "exame_unidade": texto do pedido de exame(s) a serem realizados NA PRÓPRIA
-   UPA. Escreva como um pedido médico real (cabeçalho curto + lista dos exames).
-   FORMATO DA LISTA: os exames vão em lista com TRAÇOS ("- Hemograma completo"),
-   UM POR LINHA. É PROIBIDO numerar ("1.", "2.", "1)", "a)"). Quem lê este papel
-   é o paciente, e a lista numerada faz a quantidade parecer maior do que é.
-
-`;
-        const itemExameExterno = !exameExterno ? '' : `8. "exame_externo": texto de solicitação de exame(s) para o paciente realizar
-   FORA da unidade (clínica/laboratório particular ou serviço de referência).
-   Redija no formato consagrado de um pedido de exame ("Solicito..."), citando
-   a indicação clínica quando pertinente. FORMATO DA LISTA: TRAÇOS, um exame por
-   linha, NUNCA numerada — a mesma regra do pedido na unidade.
-   ATENDER AO QUE O MÉDICO PEDIU: quando ele indicar no relato o que o pedido
-   deve conter — o CID, a justificativa clínica, o exame específico, o serviço
-   de destino —, INCLUA exatamente o que foi pedido.
+        const itemExameUnidade = '';   // v8.5: não existe mais pedido de exame na unidade
+        const itemExameExterno = !exameExterno ? '' : `8. "exame_externo": PEDIDO DE EXAME EXTERNO — exame(s) que o paciente vai fazer
+   FORA da unidade (rede SUS de referência, clínica ou laboratório). Formato fixo,
+   nesta ordem:
+   Solicito:
+   - <exame 1>
+   - <exame 2>
+   Indicação clínica: <uma frase com o motivo, a partir do relato>.
+   CID-10: <código> – <descrição>
+   REGRAS DO PEDIDO EXTERNO:
+   (1) O CID-10 é OBRIGATÓRIO e é o CID da INVESTIGAÇÃO deste relato: a hipótese
+       que o exame vai confirmar ou afastar. Se o diagnóstico ainda não está
+       fechado, use o CID do SINAL ou SINTOMA investigado (capítulo R, ex.:
+       "R10.4 – Outras dores abdominais e as não especificadas"), nunca um
+       diagnóstico que o relato não sustenta. Se o médico deu o CID, use o dele.
+   (2) Lista com TRAÇOS, um exame por linha, NUNCA numerada (quem lê é o
+       paciente, e a lista numerada parece maior do que é).
+   (3) Nome do exame por extenso, como se pede no SUS (ex.: "Ultrassonografia de
+       abdome total"), com região e lado quando o médico disse — sem inventar lado.
+   (4) Não escreva "urgente", data, nome do paciente nem assinatura.
+   (5) ATENDER AO QUE O MÉDICO PEDIU: exame específico, justificativa, serviço de
+       destino — inclua exatamente o que ele pediu.
 
 `;
 
@@ -2920,7 +3149,7 @@ REGRA ABSOLUTA DE FIDELIDADE AO RELATO:
   • Na dúvida, escreva só o que o médico disse.
 
 ${contextoFarmacologico}
-${blocoFontes}${blocoFotos}${blocoInternacao}
+${blocoFontes}${blocoFotos}${blocoInternacao}${blocoExameFisicoPrompt(ef, sexo)}${blocoCardapioPrompt(cardapioItens)}
 REGRAS DE SAÍDA (responda em JSON puro com EXATAMENTE estas chaves):
 {
   "discussao": "",
@@ -3423,6 +3652,23 @@ ${mensagemPrompt}`;
                 dados.prontuario.sinais_vitais = normalizarSeparadorVitais(dados.prontuario.sinais_vitais);
             }
 
+            // --- v8.5: CAIXINHA "EXAME FÍSICO NORMAL" ---
+            // Campo vazio com a caixinha ligada = o relato não trouxe achado de
+            // exame: entra o padrão, escrito aqui (determinístico). Campo vazio
+            // com alterações escritas = a IA não as aplicou: entra o padrão e a
+            // discussão AVISA (regra 15), mostrando o que ficou de fora.
+            if (ef && dados.prontuario && (ef.padrao || ef.alteracoes)) {
+                const efTxt = String(dados.prontuario.exame_fisico_texto || '').trim();
+                if (!efTxt) {
+                    dados.prontuario.exame_fisico_texto = efPadraoServidor(sexo);
+                    if (!ef.padrao) {
+                        dados.discussao = (dados.discussao || '')
+                            + '\n\n⚠️ A IA NÃO aplicou as suas alterações do exame físico e saiu o exame padrão. '
+                            + 'Corrija à mão antes de registrar. O que você escreveu: «' + ef.alteracoes + '»';
+                    }
+                }
+            }
+
             // --- v8.4: SINAIS VITAIS DENTRO DA EVOLUÇÃO, antes do exame ---
             // Roda ANTES de colar os exames complementares, para o laboratório
             // continuar sendo o último bloco. O campo sinais_vitais NÃO é
@@ -3503,15 +3749,41 @@ ${mensagemPrompt}`;
             // (ceftriaxona prescrita com o 💉 desligado). Agora a lista abaixo
             // vale para todos, e quando a IA escreveu algo que foi descartado
             // o médico é AVISADO (regra 15) — pode ter sido intencional.
+            // v8.5: o pedido de exame na unidade não existe mais (o 🔬 só sugere,
+            // na discussão). Se a IA escrever um por hábito, ele não aparece.
+            if (typeof dados.exame_unidade === 'string' && dados.exame_unidade.trim()) {
+                console.log('exame_unidade descartado: o 🔬 agora só sugere exames na discussão.');
+            }
+            dados.exame_unidade = '';
             const descartados = aplicarTravasDeToggle(dados, [
                 { campo: 'prescricao_interna', ligado: medicarUpa,   nome: '💉 Medicar na UPA' },
                 { campo: 'receita',            ligado: !!op.alta,    nome: '🏠 Receita' },
                 { campo: 'relatorio',          ligado: !!op.relatorio, nome: '📋 Relatório APS' },
-                { campo: 'exame_unidade',      ligado: exameUnidade, nome: '🔬 Exame na unidade' },
                 { campo: 'exame_externo',      ligado: exameExterno, nome: '🏥 Exame externo' }
             ]);
             if (descartados.length > 0) {
                 dados.discussao = (dados.discussao || '') + '\n\n' + avisoDescartePorToggle(descartados);
+            }
+            // v8.5 — pedido externo sem CID não pode passar calado (regra 15).
+            if (exameExterno && dados.exame_externo && !/\bCID/i.test(dados.exame_externo)) {
+                dados.discussao = (dados.discussao || '')
+                    + '\n\n⚠️ O pedido de exame EXTERNO saiu SEM CID — acrescente o CID da investigação antes de entregar.';
+            }
+
+            // --- v8.5: CARDÁPIO entra na prescrição da UPA (o servidor escreve) ---
+            // Linhas do cardápio primeiro, depois o que a IA acrescentou a
+            // partir do relato. Droga repetida não dobra: a linha da IA sai e,
+            // se a dose era diferente, a discussão avisa (regra 15).
+            let extrasIA = null;
+            if (cardapioItens.length) {
+                const mix = mesclarCardapio(dados.prescricao_interna, cardapioItens);
+                dados.prescricao_interna = mix.texto;
+                extrasIA = mix.extras.join('\n');
+                if (mix.avisos.length) {
+                    dados.discussao = (dados.discussao || '') + '\n\n🔁 A IA também escreveu, a partir do relato, uma droga que já estava no cardápio. '
+                        + 'Ficou só a linha do cardápio. Confira se a dose é a que você quer — a linha descartada foi:\n- '
+                        + mix.avisos.join('\n- ');
+                }
             }
 
             // --- Rede de segurança farmacológica ---
@@ -3522,7 +3794,8 @@ ${mensagemPrompt}`;
             // padronização era ruído garantido em toda receita, e o médico já
             // sabe. Continuam conferidas as duas prescrições EXECUTADAS DENTRO
             // da unidade, onde a informação ainda serve para alguma coisa.
-            const textoConferir = [dados.prescricao_interna,
+            // v8.5: linhas do cardápio não são conferidas (vêm da lista da unidade).
+            const textoConferir = [extrasIA !== null ? extrasIA : dados.prescricao_interna,
                 dados.prescricao_internacao].filter(Boolean).join('\n');
             const alertas = conferirMedicamentos(textoConferir, listaUnidade);
             if (alertas.length > 0) {
@@ -4160,10 +4433,10 @@ app.use((err, req, res, next) => {
 // QUAL versão está de fato rodando no Render. Serve para pegar o caso em que o
 // deploy falhou e o Render continuou servindo a versão anterior (o servidor
 // segue no ar, então nada parece errado — mas o código novo não está valendo).
-const VERSAO_SERVIDOR = 'v8.4';
+const VERSAO_SERVIDOR = 'v8.5';
 app.get('/', (req, res) => res.send(
     'Servidor do Prontuario Rapido ' + VERSAO_SERVIDOR + ' no ar. '
-    + 'Linhas esperadas no server.js: 4170.'
+    + 'Linhas esperadas no server.js: 4443.'
 ));
 
 const PORT = process.env.PORT || 3000;

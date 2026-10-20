@@ -1,6 +1,18 @@
 <!DOCTYPE html>
 <!--
-  PRONTUÁRIO RÁPIDO - TELA (FRONTEND) - v8.4 - 15/out/2026
+  PRONTUÁRIO RÁPIDO - TELA (FRONTEND) - v8.5 - 19/out/2026
+  Novidades da v8.5 (cada uma pode ser desligada em RECURSOS_V85, no script):
+   1) Caixinha "Exame físico normal" abaixo do relato (só na aba Prontuário),
+      marcada por padrão, com campo de 3 linhas para alterações e sinais
+      vitais. Escrever no campo desmarca a caixinha.
+   2) Cardápio de medicações da UPA abaixo do 💉 Medicar na UPA, por classe,
+      com a lista de cada unidade. Tocar de novo na dose (ou em "Tirar")
+      desfaz. A linha vai pronta e o servidor a escreve na prescrição.
+      Os anexos desceram para depois do cardápio.
+   3) O 🔬 virou "Sugerir exames (na discussão)": não gera mais pedido.
+  "Limpar relato" agora também limpa o cardápio e remarca o exame normal.
+  Precisa do server.js v8.5 no Render: os dois arquivos sobem JUNTOS.
+
   Novidades da v8.4:
    1) O botão "📋 Copiar" do documento inteiro passa a existir NAS DUAS
       UNIDADES (antes só no Acrízio). Numa evolução ele se chama "Copiar
@@ -279,6 +291,49 @@
     .codigo-destaque{font-size:22px; letter-spacing:6px; font-weight:bold; display:block; margin-top:4px;}
     .ponte-row{display:flex; gap:8px; margin-top:10px; align-items:center; flex-wrap:wrap;}
     #codigoPonte{width:110px; text-align:center; font-weight:bold; letter-spacing:4px; font-size:16px;}
+    /* v8.5 — caixinha "Exame físico normal", logo abaixo do relato. */
+    .ef-linha{display:flex; align-items:flex-start; gap:8px; margin-top:6px;}
+    .ef-chk{display:flex; align-items:center; gap:5px; margin:6px 0 0; font-size:12.5px; white-space:nowrap; cursor:pointer;}
+    .ef-chk input{width:16px; height:16px; margin:0; accent-color:var(--verde);}
+    textarea#efAlteracoes{flex:1; min-width:0; min-height:66px; height:66px; padding:6px 8px; font-size:13px; line-height:1.4;}
+    .ef-padrao{white-space:pre-wrap; font-family:monospace; font-size:12px; background:var(--box);
+        border-left:3px solid var(--verde); padding:7px 9px; margin-top:4px; color:var(--texto);}
+    details.ef-ver summary{font-size:11px; color:var(--azul); cursor:pointer; margin-top:3px;}
+    /* v8.5 — cardápio de medicações: tudo pequeno, sem precisar rolar. */
+    .cardapio{background:var(--box); border:1px solid var(--line); border-radius:8px;
+        padding:8px 12px 10px; margin:-6px 0 12px; display:flex; flex-direction:column; gap:7px;}
+    .cd-classes{display:flex; flex-wrap:wrap; gap:5px;}
+    .cd-classes button{border:1px solid var(--line); background:var(--panel); color:var(--texto);
+        border-radius:14px; padding:4px 10px; font-size:12px; font-weight:bold; cursor:pointer; white-space:nowrap;}
+    .cd-classes button.on{background:var(--azul); border-color:var(--azul); color:#fff;}
+    .cd-classes button b{color:var(--verde); margin-left:2px;}
+    .cd-classes button.on b{color:#fff;}
+    .cd-drogas{display:flex; flex-wrap:wrap; gap:5px;}
+    .cd-drogas button{border:1px solid var(--azul); background:transparent; color:var(--azul); border-radius:14px;
+        padding:4px 10px; font-size:12.5px; font-weight:bold; cursor:pointer;}
+    .cd-drogas button.aberta{background:rgba(79,172,254,.16);}
+    .cd-drogas button.tem{border-color:var(--verde); color:var(--verde); background:rgba(76,175,80,.14);}
+    .cd-conf{background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px; display:flex; flex-direction:column; gap:6px;}
+    .cd-nome{font-weight:bold; font-size:13px; color:var(--titulo);}
+    .cd-opc{display:flex; flex-wrap:wrap; gap:5px; align-items:center;}
+    .cd-rot{font-size:11px; color:var(--nota); min-width:46px;}
+    .cd-fixo{font-size:12px; color:var(--nota);}
+    .cd-opc button{border:1px solid var(--line); background:var(--box); color:var(--texto); border-radius:6px;
+        padding:5px 9px; font-size:12.5px; font-weight:bold; cursor:pointer;}
+    .cd-opc button.on{border-color:var(--verde); background:var(--verde); color:#fff;}
+    .cd-opc input{width:84px; padding:5px 6px; font-size:13px;}
+    .cd-step{display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:6px; overflow:hidden;}
+    .cd-step button{border:none; border-radius:0; padding:5px 10px;}
+    .cd-step span{min-width:28px; text-align:center; font-weight:bold; font-size:13px;}
+    .cd-check{display:flex; align-items:center; gap:5px; font-size:12px; font-weight:normal; margin:0;}
+    .cd-add{align-self:flex-start; border:none; background:var(--verde); color:#fff; border-radius:6px;
+        padding:6px 12px; font-size:12.5px; font-weight:bold; cursor:pointer;}
+    .cd-tirar{align-self:flex-start; border:1px solid #ff6b6b; background:transparent; color:#ff6b6b; border-radius:6px;
+        padding:5px 10px; font-size:12px; font-weight:bold; cursor:pointer;}
+    .cd-titulo{font-size:11px; color:var(--nota); font-weight:bold; text-transform:uppercase; letter-spacing:.04em;}
+    .cd-item{display:grid; grid-template-columns:1fr auto; gap:6px; align-items:start; background:var(--panel);
+        border-left:3px solid var(--verde); border-radius:4px; padding:5px 8px; font-family:monospace; font-size:12.5px; line-height:1.45;}
+    .cd-item button{border:none; background:transparent; color:#ff6b6b; font-size:15px; cursor:pointer; padding:0 2px;}
 </style>
 </head>
 <body>
@@ -365,6 +420,36 @@
     <div class="field-mb">
         <label for="mensagem" id="lblMensagem">Relato Clínico ou Dúvida:</label>
         <textarea id="mensagem" placeholder="Paciente com cefaleia unilateral pulsátil há 6h..."></textarea>
+        <!-- v8.5 — só na aba Prontuário. Marcada por padrão; escrever no campo
+             desmarca. Ver RECURSOS_V85 no script para desligar esta função. -->
+        <div id="efWrap">
+            <div class="ef-linha">
+                <label class="ef-chk" for="chkEfNormal"><input type="checkbox" id="chkEfNormal" checked> Exame físico normal</label>
+                <textarea id="efAlteracoes" rows="3" placeholder="alterações do exame ou sinais vitais (ex.: PA 130x80, FC 98, sibilos difusos)"></textarea>
+            </div>
+            <div class="nota" id="efNota"></div>
+            <details class="ef-ver"><summary>ver o exame padrão</summary><div class="ef-padrao" id="efPadraoTxt"></div></details>
+        </div>
+    </div>
+
+    <div class="toggle-upa">
+        <div>
+            <div class="lbl">💉 Medicar na UPA</div>
+            <div class="sub" id="subMedicarUpa">Desligado = não gera prescrição interna. Ligue só se for medicar na unidade.</div>
+        </div>
+        <label class="switch">
+            <input type="checkbox" id="chkMedicarUpa">
+            <span class="slider"></span>
+        </label>
+    </div>
+    <!-- v8.5 — CARDÁPIO: classe → droga → via → dose. A linha escolhida vai
+         pronta para o servidor, que a escreve na prescrição sem passar pela IA.
+         Ver RECURSOS_V85 no script para desligar esta função. -->
+    <div class="cardapio" id="cardapio">
+        <div class="cd-classes" id="cdClasses"></div>
+        <div class="cd-drogas" id="cdDrogas"></div>
+        <div id="cdConf"></div>
+        <div id="cdLista"></div>
     </div>
 
     <!-- ANEXOS: fotos de documentos (exames, prontuários antigos, evoluções).
@@ -389,16 +474,6 @@
         <div class="nota">A IA só usa os anexos conforme a sua instrução no relato (ex.: "transcreva o hemograma da foto no prontuário"). O anexo nunca vira documento sozinho, não entra no histórico e é apagado do servidor ao ser recebido. <strong>PDF:</strong> aceito no anexo direto (até ~4 MB), mas <strong>não passa pela ponte por código</strong> — nesse caso anexe o PDF no próprio aparelho em que for gerar. <strong>No celular:</strong> anexe as fotos e toque em "📤 Gerar código" — anote o código de 4 dígitos. <strong>No computador:</strong> digite o código e toque em "🔑 Receber". Cada código vale 30 minutos e funciona uma única vez.</div>
     </div>
 
-    <div class="toggle-upa">
-        <div>
-            <div class="lbl">💉 Medicar na UPA</div>
-            <div class="sub">Desligado = não gera prescrição interna. Ligue só se for medicar na unidade.</div>
-        </div>
-        <label class="switch">
-            <input type="checkbox" id="chkMedicarUpa">
-            <span class="slider"></span>
-        </label>
-    </div>
 
     <div class="toggles-lista">
         <div class="toggle-item">
@@ -410,7 +485,7 @@
             <label class="switch"><input type="checkbox" id="chkRelatorio"><span class="slider"></span></label>
         </div>
         <div class="toggle-item">
-            <span class="lbl">🔬 Pedir exame (na unidade)</span>
+            <span class="lbl">🔬 Sugerir exames (na discussão)</span>
             <label class="switch"><input type="checkbox" id="chkExameUnidade"><span class="slider"></span></label>
         </div>
         <div class="toggle-item">
@@ -458,6 +533,8 @@
         <div class="modal-linha"><strong>Cérebro da IA:</strong> <span id="confModelo">—</span></div>
         <div class="modal-linha"><strong>Ligados:</strong> <span id="confToggles">—</span></div>
         <div class="modal-linha"><strong>Anexos:</strong> <span id="confAnexos">—</span></div>
+        <div class="modal-linha"><strong>Cardápio:</strong> <span id="confCardapio">—</span></div>
+        <div class="modal-linha" id="confEfLinha"><strong>Exame físico:</strong> <span id="confEf">—</span></div>
         <div class="modal-botoes">
             <button class="modal-voltar" onclick="fecharConfirmacao()">✏️ Corrigir</button>
             <button class="modal-ok" onclick="confirmarEnvio()">✅ Confirmar e gerar</button>
@@ -601,6 +678,14 @@
     const API_URL = BASE_URL + '/api/atendimento';
 
     let tipoAtual = 'prontuario';
+
+    // v8.5 — CHAVES DE CADA FUNÇÃO NOVA. Trocar true por false desliga a
+    // função na tela (ela some e nada dela é enviado ao servidor), sem mexer
+    // em mais nada. É o jeito de voltar atrás numa função só.
+    const RECURSOS_V85 = {
+        exameFisicoNormal: true,  // caixinha "Exame físico normal" + campo de alterações
+        cardapio: true            // cardápio de medicações da UPA
+    };
 
     // ---- SENHA DE ACESSO ----
     // Pedida uma vez por plantão e guardada só na SESSÃO do navegador (some ao
@@ -896,6 +981,7 @@
         if(cx) cx.placeholder = ehInt
             ? 'Ex.: interno, mantenho ceftriaxona e a hidratação, dieta branda. (pode deixar vazio)'
             : 'Paciente com cefaleia unilateral pulsátil há 6h...';
+        atualizarEF();   // v8.5
     }
 
     // v8.1 — atalho do fim da tela: vai para a aba Internação mantendo o BE.
@@ -909,9 +995,44 @@
     }
 
     // ---- Limpar só o relato ----
+    // v8.5: também volta a caixinha do exame físico para "normal".
     function limpar(){
         document.getElementById('mensagem').value = '';
+        efLimpar();
+        cdLimpar();
         document.getElementById('mensagem').focus();
+    }
+
+    // ---- v8.5: caixinha "Exame físico normal" (só na aba Prontuário) ----
+    function efPadraoTexto(){
+        const a = document.getElementById('sexo').value === 'M' ? 'o' : 'a';
+        return 'BEG, orientad' + a + ' no tempo e no espaço, eupneic' + a + ', corad' + a + ', hidratad' + a + ', acianótic' + a + ', anictéric' + a + '\n'
+            + 'ACV: ritmo cardíaco regular em 2 tempos, bulhas normofonéticas, sem sopros\n'
+            + 'AR: MVF presente bilateralmente, sem RA\n'
+            + 'AD: plano, flácido, RHA presentes, indolor à palpação, sem massas ou visceromegalias\n'
+            + 'Neurológico: vigil, orientad' + a + ', sem déficits focais';
+    }
+    function atualizarEF(){
+        const wrap = document.getElementById('efWrap');
+        if(!wrap) return;
+        wrap.style.display = (RECURSOS_V85.exameFisicoNormal && tipoAtual === 'prontuario') ? 'block' : 'none';
+        const chk = document.getElementById('chkEfNormal').checked;
+        const alt = document.getElementById('efAlteracoes').value.trim();
+        document.getElementById('efNota').innerText = chk
+            ? 'Sai o exame normal padrão. Achado de exame escrito no relato também entra como alteração.'
+            : (alt ? 'Sai o padrão, trocando só o que as suas alterações contradizem. Sinais vitais vão para o quadro deles.'
+                   : 'Sem padrão: o exame sai só com o que estiver no relato.');
+        document.getElementById('efPadraoTxt').innerText = efPadraoTexto();
+    }
+    function efEnvio(){
+        if(!RECURSOS_V85.exameFisicoNormal || tipoAtual !== 'prontuario') return null;
+        return { padrao: document.getElementById('chkEfNormal').checked,
+                 alteracoes: document.getElementById('efAlteracoes').value.trim() };
+    }
+    function efLimpar(){
+        document.getElementById('chkEfNormal').checked = true;
+        document.getElementById('efAlteracoes').value = '';
+        atualizarEF();
     }
 
     function setBox(idDoc, idRes, texto){
@@ -1362,7 +1483,9 @@
                 medicarUpa: document.getElementById('chkMedicarUpa').checked,
                 exameUnidade: document.getElementById('chkExameUnidade').checked,
                 exameExterno: document.getElementById('chkExameExterno').checked
-            }
+            },
+            exameFisico: efEnvio(),  // v8.5
+            cardapio: cdItensEnvio() // v8.5
         };
     }
 
@@ -1378,7 +1501,7 @@
             [c.opcoes.medicarUpa,    '💉 Medicar na UPA'],
             [c.opcoes.alta,          '🏠 Receita'],
             [c.opcoes.relatorio,     '📋 Relatório APS'],
-            [c.opcoes.exameUnidade,  '🔬 Exame na unidade'],
+            [c.opcoes.exameUnidade,  '🔬 Sugerir exames'],
             [c.opcoes.exameExterno,  '🏥 Exame externo'],
             [c.opcoes.buscarFontes,  '🔎 Buscar em fontes'],
             [c.opcoes.compararIAs,   '⚖️ Comparar IAs'],
@@ -1405,6 +1528,11 @@
         document.getElementById('confModelo').innerText  = rotuloModelo;
         document.getElementById('confToggles').innerText = nomesToggles.length ? nomesToggles.join(' · ') : 'nenhum';
         document.getElementById('confAnexos').innerText  = partesAnexo.length ? partesAnexo.join(' + ') : 'nenhum';
+        document.getElementById('confCardapio').innerText = c.cardapio.length
+            ? c.cardapio.length + (c.cardapio.length > 1 ? ' itens' : ' item') : 'nenhum';
+        document.getElementById('confEfLinha').style.display = c.exameFisico ? 'block' : 'none';
+        if(c.exameFisico) document.getElementById('confEf').innerText = c.exameFisico.padrao
+            ? 'normal (padrão)' : (c.exameFisico.alteracoes ? 'padrão + suas alterações' : 'só o que está no relato');
 
         document.getElementById('modalConfirmar').classList.add('aberto');
     }
@@ -1433,6 +1561,7 @@
         const c = lerCamposEnvio();
         const beId = c.beId, mensagem = c.mensagem, unidade = c.unidade;
         const modeloId = c.modeloId, sexo = c.sexo, idade = c.idade, opcoes = c.opcoes;
+        const exameFisico = c.exameFisico, cardapio = c.cardapio;   // v8.5
         const btn = document.getElementById('btnEnviar');
 
         // Anexos: vão junto do pedido (tanto os deste aparelho quanto as fotos
@@ -1473,7 +1602,7 @@
                 method:'POST',
                 headers:{'Content-Type':'application/json'},
                 signal: controleEnvio.signal,
-                body: JSON.stringify({beId,mensagem,unidade,opcoes,modeloId,sexo,idade,tipoDocumento:tipoAtual,imagens})
+                body: JSON.stringify({beId,mensagem,unidade,opcoes,modeloId,sexo,idade,tipoDocumento:tipoAtual,imagens,exameFisico,cardapio})
             });
             const data = await resp.json();
             if(data.erro){
@@ -1660,6 +1789,389 @@
     document.getElementById('codigoPonte').addEventListener('keydown', function(e){
         if(e.key === 'Enter'){ e.preventDefault(); receberPorCodigo(); }
     });
+
+    // v8.5 — escrever no campo de alterações desmarca a caixinha; apagar tudo remarca.
+    document.getElementById('efAlteracoes').addEventListener('input', function(){
+        document.getElementById('chkEfNormal').checked = this.value.trim() === '';
+        atualizarEF();
+    });
+    document.getElementById('chkEfNormal').addEventListener('change', atualizarEF);
+    document.getElementById('sexo').addEventListener('change', atualizarEF);
+    atualizarEF();
+
+    // ======================================================================
+    //  v8.5 — CARDÁPIO DE MEDICAÇÕES DA UPA + CAIXINHA "EXAME FÍSICO NORMAL"
+    // ----------------------------------------------------------------------
+    //  O cardápio monta linhas de prescrição PRONTAS, com a dose exata que o
+    //  médico tocou. Essas linhas vão para o servidor à parte do relato, e é o
+    //  SERVIDOR que as escreve na prescrição — a IA não reescreve nem muda dose.
+    //  Cada unidade tem a sua lista (A = Acrízio/Justinópolis, B = Barreiro).
+    //  Regra de cada droga: B ausente = igual ao Acrízio; B null = não existe
+    //  no Barreiro. Opção com 'inp' pede um número (mL, gotas, L/min).
+    // ======================================================================
+    const CD_CLASSES = [
+        ['analg','Analgésicos e opioides'], ['soro','Soros'], ['ai','Anti-inflam. e corticoides'],
+        ['ae','Antieméticos e GI'], ['atb','Antibióticos'], ['pep','Profilaxia pós-exposição'], ['psi','Psiquiatria'],
+        ['resp','Respiratório e O₂'], ['card','Cardio']
+    ];
+    const cdFmt = n => String(Math.round(n * 100) / 100).replace('.', ',');
+    const cdL = (rot, linha) => ({ rot, linha });
+    const cdI = (rot, ph, max, fn) => ({ rot, inp: { ph, max, fn } });
+    const CD_DROGAS = [
+        // ---------- Analgésicos e opioides ----------
+        {id:'dip', n:'Dipirona', c:'analg', A:{vias:{
+            VO:[cdL('40 gotas','Dipirona 500 mg/mL gotas — 40 gotas VO agora.')],
+            IM:[cdL('1 ampola (1 g)','Dipirona 1 g (500 mg/mL, 2 mL) — 1 ampola IM agora.')],
+            EV:[cdL('1 ampola (1 g)','Dipirona 1 g (500 mg/mL, 2 mL) — 1 ampola EV agora.')]}}},
+        {id:'pcm', n:'Paracetamol', c:'analg', A:{vias:{
+            VO:[cdL('50 gotas','Paracetamol 200 mg/mL gotas — 50 gotas (500 mg) VO agora.'),
+                cdL('75 gotas','Paracetamol 200 mg/mL gotas — 75 gotas (750 mg) VO agora.'),
+                cdL('100 gotas','Paracetamol 200 mg/mL gotas — 100 gotas (1 g) VO agora.'),
+                cdL('1 cp 500','Paracetamol 500 mg — 1 comprimido VO agora.'),
+                cdL('2 cp 500','Paracetamol 500 mg — 2 comprimidos (1 g) VO agora.')]}},
+            B:{vias:{VO:[
+                cdL('50 gotas','Paracetamol 200 mg/mL gotas — 50 gotas (500 mg) VO agora.'),
+                cdL('75 gotas','Paracetamol 200 mg/mL gotas — 75 gotas (750 mg) VO agora.'),
+                cdL('100 gotas','Paracetamol 200 mg/mL gotas — 100 gotas (1 g) VO agora.')]}}},
+        {id:'cod', n:'Paracetamol + codeína', c:'analg', A:{vias:{
+            VO:[cdL('1 cp','Paracetamol 500 mg + codeína 30 mg — 1 comprimido VO agora.')]}}, B:null},
+        {id:'tram', n:'Tramadol', c:'analg', A:{vias:{EV:[
+                cdL('1 ampola (100 mg)','Tramadol 100 mg/2 mL — 1 ampola (100 mg) EV agora.'),
+                cdL('½ ampola (50 mg)','Tramadol 100 mg/2 mL — ½ ampola (1 mL = 50 mg) EV agora.'),
+                cdL('1 ampola se dor após 45 min','Tramadol 100 mg/2 mL — 1 ampola (100 mg) EV se a dor persistir 45 minutos após as medicações iniciais.')]}},
+            B:{vias:{EV:[
+                cdL('100 mg (2 mL)','Tramadol 50 mg/mL — 2 mL (100 mg) EV agora.'),
+                cdL('50 mg (1 mL)','Tramadol 50 mg/mL — 1 mL (50 mg) EV agora.'),
+                cdL('100 mg se dor após 45 min','Tramadol 50 mg/mL — 2 mL (100 mg) EV se a dor persistir 45 minutos após as medicações iniciais.')]}}},
+        {id:'morf', n:'Morfina', c:'analg', A:{vias:{EV:[
+                cdL('3 mL','Morfina 10 mg/mL — diluir 1 ampola (1 mL) em 9 mL de SF 0,9% (1 mg/mL) e fazer 3 mL (3 mg) EV agora.'),
+                cdL('4 mL','Morfina 10 mg/mL — diluir 1 ampola (1 mL) em 9 mL de SF 0,9% (1 mg/mL) e fazer 4 mL (4 mg) EV agora.'),
+                cdI('Outro','mL', 10, n => 'Morfina 10 mg/mL — diluir 1 ampola (1 mL) em 9 mL de SF 0,9% (1 mg/mL) e fazer '
+                    + cdFmt(n) + ' mL (' + cdFmt(n) + ' mg) EV agora.')]}}},
+        // ---------- Soros (montagem própria) ----------
+        {id:'sf', n:'SF 0,9% 500 mL', c:'soro', esp:'soro', rotulo:'SF 0,9% 500 mL', A:{}},
+        {id:'rl', n:'Ringer lactato 500 mL', c:'soro', esp:'soro', rotulo:'Ringer lactato 500 mL', A:{}},
+        // ---------- Anti-inflamatórios e corticoides ----------
+        {id:'ceto', n:'Cetoprofeno', c:'ai', A:{vias:{
+            IM:[cdL('1 ampola (100 mg)','Cetoprofeno 100 mg/2 mL — 1 ampola IM agora.')],
+            EV:[cdL('1 frasco (100 mg)','Cetoprofeno 100 mg pó — 1 frasco-ampola EV agora.')]}}, B:null},
+        {id:'teno', n:'Tenoxicam', c:'ai', A:null, B:{vias:{
+            IM:[cdL('1 frasco (20 mg)','Tenoxicam 20 mg — 1 frasco-ampola IM agora.')],
+            EV:[cdL('1 frasco (20 mg)','Tenoxicam 20 mg — 1 frasco-ampola EV agora.')]}}},
+        {id:'ibu', n:'Ibuprofeno', c:'ai', A:{vias:{VO:[cdL('1 cp 600','Ibuprofeno 600 mg — 1 comprimido VO agora.')]}}},
+        {id:'dexa', n:'Dexametasona', c:'ai', A:{vias:{
+            IM:[cdL('1 ampola (10 mg)','Dexametasona 4 mg/mL (2,5 mL = 10 mg) — 1 ampola IM agora.')],
+            EV:[cdL('1 ampola (10 mg)','Dexametasona 4 mg/mL (2,5 mL = 10 mg) — 1 ampola EV agora.')]}}},
+        {id:'hidro', n:'Hidrocortisona', c:'ai', A:{vias:{EV:[
+            cdL('1 frasco (100 mg)','Hidrocortisona 100 mg — 1 frasco-ampola EV agora.'),
+            cdL('2 frascos (200 mg)','Hidrocortisona 100 mg — 2 frascos-ampola (200 mg) EV agora.'),
+            cdL('3 frascos (300 mg)','Hidrocortisona 100 mg — 3 frascos-ampola (300 mg) EV agora.')]}}},
+        // ---------- Antieméticos e GI ----------
+        {id:'meto', n:'Metoclopramida', c:'ae', A:{vias:{
+            VO:[cdL('1 cp 10 mg','Metoclopramida 10 mg — 1 comprimido VO agora.')],
+            EV:[cdL('1 ampola (10 mg)','Metoclopramida 10 mg/2 mL — 1 ampola EV agora.')]}}},
+        {id:'bromo', n:'Bromoprida', c:'ae', A:{vias:{
+            EV:[cdL('1 ampola (10 mg)','Bromoprida 10 mg/2 mL — 1 ampola EV agora.')],
+            VO:[cdL('60 gotas (10 mg)','Bromoprida 4 mg/mL gotas — 60 gotas (10 mg) VO agora.'),
+                cdL('30 gotas (5 mg)','Bromoprida 4 mg/mL gotas — 30 gotas (5 mg) VO agora.')]}}, B:null},
+        {id:'ondan', n:'Ondansetrona', c:'ae', A:null, B:{vias:{
+            VO:[cdL('1 cp 4 mg','Ondansetrona 4 mg comprimido dispersível — 1 comprimido VO agora.')]}}},
+        {id:'esco', n:'Escopolamina', c:'ae', A:{vias:{
+            VO:[cdL('1 cp 10 mg','Escopolamina 10 mg — 1 comprimido VO agora.'),
+                cdL('2 cp 10 mg','Escopolamina 10 mg — 2 comprimidos (20 mg) VO agora.')],
+            EV:[cdL('1 ampola (20 mg)','Escopolamina 20 mg/mL — 1 ampola EV agora.')]}}},
+        {id:'ome', n:'Omeprazol', c:'ae', A:{vias:{
+            VO:[cdL('1 cáps 20 mg','Omeprazol 20 mg — 1 cápsula VO agora.'),
+                cdL('2 cáps (40 mg)','Omeprazol 20 mg — 2 cápsulas (40 mg) VO agora.')],
+            EV:[cdL('1 frasco (40 mg)','Omeprazol 40 mg — 1 frasco-ampola EV agora.')]}}},
+        {id:'glic', n:'Glicerina 12%', c:'ae', A:{vias:{Retal:[
+            cdL('250 mL','Glicerina 12% — 250 mL via retal (clister glicerinado) agora.'),
+            cdL('500 mL','Glicerina 12% — 1 frasco (500 mL) via retal (clister glicerinado) agora.')]}}},
+        {id:'lactu', n:'Lactulose', c:'ae', A:null, B:{vias:{VO:[
+            cdL('15 mL','Lactulose 667 mg/mL — 15 mL VO agora.'),
+            cdL('30 mL','Lactulose 667 mg/mL — 30 mL VO agora.')]}}},
+        // ---------- Antibióticos ----------
+        {id:'cefx', n:'Ceftriaxona', c:'atb', A:{vias:{EV:[
+            cdL('1 g','Ceftriaxona 1 g — 1 frasco-ampola EV agora.'),
+            cdL('2 g','Ceftriaxona 1 g — 2 frascos-ampola (2 g) EV agora.')]}}},
+        {id:'amc', n:'Amoxicilina + clavulanato', c:'atb', A:{vias:{
+            VO:[cdL('1 cp 500/125','Amoxicilina 500 mg + clavulanato 125 mg — 1 comprimido VO agora.')],
+            EV:[cdL('1 frasco (1 g/200 mg)','Amoxicilina 1 g + clavulanato 200 mg — 1 frasco-ampola EV agora.')]}}},
+        {id:'azi', n:'Azitromicina', c:'atb', A:{vias:{VO:[cdL('1 cp 500','Azitromicina 500 mg — 1 comprimido VO agora.')]}}},
+        {id:'clin', n:'Clindamicina', c:'atb', A:{vias:{EV:[cdL('1 ampola (600 mg)','Clindamicina 600 mg/4 mL — 1 ampola EV agora.')]}}, B:null},
+        {id:'cipro', n:'Ciprofloxacino', c:'atb', A:{vias:{VO:[cdL('1 cp 500','Ciprofloxacino 500 mg — 1 comprimido VO agora.')]}}},
+        {id:'cefa', n:'Cefalexina', c:'atb', A:{vias:{VO:[
+            cdL('1 cp 500','Cefalexina 500 mg — 1 comprimido VO agora.'),
+            cdL('2 cp (1 g)','Cefalexina 500 mg — 2 comprimidos (1 g) VO agora.')]}}},
+        {id:'metro', n:'Metronidazol', c:'atb', A:{vias:{
+            VO:[cdL('1 cp (250 mg)','Metronidazol 250 mg — 1 comprimido VO agora.'),
+                cdL('2 cp (500 mg)','Metronidazol 250 mg — 2 comprimidos (500 mg) VO agora.')],
+            EV:[cdL('1 bolsa (500 mg)','Metronidazol 500 mg/100 mL — 1 bolsa EV agora.')]}}},
+        {id:'fluco', n:'Fluconazol', c:'atb', A:{vias:{VO:[cdL('1 cáps 150','Fluconazol 150 mg — 1 cápsula VO agora.')]}}},
+        // ---------- Profilaxia pós-exposição (HIV) — as duas drogas juntas, 1ª dose ----------
+        {id:'pep', n:'PEP HIV (1ª dose)', c:'pep', A:{vias:{VO:[
+            cdL('TDF/3TC + DTG','Tenofovir 300 mg + lamivudina 300 mg — 1 comprimido VO agora (1ª dose da profilaxia pós-exposição ao HIV).\n'
+                + 'Dolutegravir 50 mg — 1 comprimido VO agora (1ª dose da profilaxia pós-exposição ao HIV).')]}}},
+        // ---------- Psiquiatria ----------
+        {id:'halo', n:'Haloperidol', c:'psi', A:{vias:{
+            VO:[cdL('10 gotas (1 mg)','Haloperidol 2 mg/mL gotas — 10 gotas (1 mg) VO agora.'),
+                cdL('20 gotas (2 mg)','Haloperidol 2 mg/mL gotas — 20 gotas (2 mg) VO agora.'),
+                cdL('50 gotas (5 mg)','Haloperidol 2 mg/mL gotas — 50 gotas (5 mg) VO agora.'),
+                cdL('1 cp 5 mg','Haloperidol 5 mg — 1 comprimido VO agora.')],
+            IM:[cdL('1 ampola (5 mg)','Haloperidol 5 mg/mL — 1 ampola IM agora.')]}},
+            B:{vias:{
+            VO:[cdL('1 cp 5 mg','Haloperidol 5 mg — 1 comprimido VO agora.')],
+            IM:[cdL('1 ampola (5 mg)','Haloperidol 5 mg/mL — 1 ampola IM agora.')]}}},
+        {id:'clona', n:'Clonazepam', c:'psi', A:{vias:{VO:[
+            cdL('5 gotas','Clonazepam 2,5 mg/mL gotas — 5 gotas (0,5 mg) VO agora.'),
+            cdL('10 gotas','Clonazepam 2,5 mg/mL gotas — 10 gotas (1 mg) VO agora.'),
+            cdI('Outro','gotas', 60, n => 'Clonazepam 2,5 mg/mL gotas — ' + cdFmt(n) + ' gotas (' + cdFmt(n * 0.1) + ' mg) VO agora.')]}}, B:null},
+        {id:'prome', n:'Prometazina', c:'psi', A:{vias:{
+            VO:[cdL('1 cp 25 mg','Prometazina 25 mg — 1 comprimido VO agora.'),
+                cdL('2 cp 25 mg','Prometazina 25 mg — 2 comprimidos (50 mg) VO agora.')],
+            IM:[cdL('1 ampola (50 mg)','Prometazina 50 mg/2 mL — 1 ampola IM agora.')]}},
+            B:{vias:{IM:[cdL('1 ampola (50 mg)','Prometazina 25 mg/mL (2 mL = 50 mg) — 1 ampola IM agora.')]}}},
+        {id:'diaz', n:'Diazepam', c:'psi', A:{vias:{
+            VO:[cdL('1 cp 10 mg','Diazepam 10 mg — 1 comprimido VO agora.')],
+            IM:[cdL('1 ampola (10 mg)','Diazepam 10 mg/2 mL — 1 ampola IM agora.')],
+            EV:[cdL('1 ampola (10 mg)','Diazepam 10 mg/2 mL — 1 ampola EV agora.')]}}},
+        {id:'mida', n:'Midazolam', c:'psi', esp:'mida', A:{}},
+        {id:'clorp', n:'Clorpromazina', c:'psi', A:{vias:{
+            VO:[cdI('gotas (digitar)','gotas', 200, n => 'Clorpromazina 40 mg/mL gotas — ' + cdFmt(n) + ' gotas (' + cdFmt(n) + ' mg) VO agora.'),
+                cdL('1 cp 25 mg','Clorpromazina 25 mg — 1 comprimido VO agora.')],
+            IM:[cdL('1 ampola (25 mg)','Clorpromazina 25 mg/5 mL — 1 ampola IM agora.')]}}, B:null},
+        // ---------- Respiratório e O2 ----------
+        {id:'bronco', n:'Salbutamol / ipratrópio', c:'resp', esp:'bronco', A:{}},
+        {id:'o2', n:'Oxigenoterapia', c:'resp', A:{vias:{'Cateter nasal':[
+            cdL('SpO2 92–94%','Oxigenoterapia por cateter nasal — titular para manter SpO2 entre 92 e 94%.'),
+            cdL('SpO2 > 94%','Oxigenoterapia por cateter nasal — titular para manter SpO2 acima de 94%.'),
+            cdI('L/min','L/min', 6, n => 'Oxigenoterapia por cateter nasal a ' + cdFmt(n) + ' L/min.')]}}},
+        // ---------- Cardio ----------
+        {id:'aas', n:'AAS', c:'card', A:{vias:{VO:[
+            cdL('2 cp (200 mg)','AAS 100 mg — 2 comprimidos (200 mg) VO agora.'),
+            cdL('3 cp (300 mg)','AAS 100 mg — 3 comprimidos (300 mg) VO agora.')]}}},
+        {id:'clopi', n:'Clopidogrel', c:'card', A:{vias:{VO:[
+            cdL('4 cp (300 mg)','Clopidogrel 75 mg — 4 comprimidos (300 mg) VO agora.')]}}}
+    ];
+    const CD_MIDA = {
+        A:[{id:'m5', rot:'5 mg/5 mL', mgml:1, vol:5}, {id:'m15', rot:'15 mg/3 mL', mgml:5, vol:3}, {id:'m50', rot:'50 mg/10 mL', mgml:5, vol:10}],
+        B:[{id:'m15', rot:'15 mg/3 mL', mgml:5, vol:3}, {id:'m50', rot:'50 mg/10 mL', mgml:5, vol:10}]
+    };
+
+    const cd = { classe:'analg', aberta:null, esc:{}, itens:{} };
+    const cdEl = id => document.getElementById(id);
+    const cdU = () => document.getElementById('unidade').value === 'BARREIRO' ? 'B' : 'A';
+    function cdCfg(d){
+        if(cdU() === 'B'){ if(d.B === null) return null; if(d.B === undefined) return d.A; return d.B; }
+        return d.A || null;
+    }
+    const cdDaUnidade = () => CD_DROGAS.filter(d => cdCfg(d));
+    const cdBtn = (rot, on, attr) => '<button type="button" class="' + (on ? 'on' : '') + '" ' + attr + '>' + rot + '</button>';
+
+    function cdRenderClasses(){
+        const tem = new Set(cdDaUnidade().map(d => d.c));
+        cdEl('cdClasses').innerHTML = CD_CLASSES.filter(c => tem.has(c[0])).map(c => {
+            const n = Object.keys(cd.itens).filter(id => CD_DROGAS.find(d => d.id === id).c === c[0]).length;
+            return cdBtn(c[1] + (n ? ' <b>' + n + '</b>' : ''), cd.classe === c[0], 'data-c="' + c[0] + '"');
+        }).join('');
+    }
+    function cdRenderDrogas(){
+        cdEl('cdDrogas').innerHTML = cdDaUnidade().filter(d => d.c === cd.classe).map(d => {
+            const cls = (cd.itens[d.id] ? 'tem ' : '') + (cd.aberta === d.id ? 'aberta' : '');
+            return '<button type="button" class="' + cls + '" data-d="' + d.id + '">' + (cd.itens[d.id] ? '✓ ' : '') + d.n + '</button>';
+        }).join('');
+    }
+    function cdRenderConf(){
+        const box = cdEl('cdConf');
+        if(!cd.aberta){ box.innerHTML = ''; return; }
+        const d = CD_DROGAS.find(x => x.id === cd.aberta), c = cdCfg(d);
+        const e = cd.esc[d.id] || (cd.esc[d.id] = {});
+        let h = '<div class="cd-conf"><div class="cd-nome">' + d.n + '</div>';
+        if(d.esp === 'soro') h += cdConfSoro(e);
+        else if(d.esp === 'mida') h += cdConfMida(e);
+        else if(d.esp === 'bronco') h += cdConfBronco(e);
+        else {
+            const vias = Object.keys(c.vias);
+            if(!e.via || vias.indexOf(e.via) === -1) e.via = vias[0];
+            h += '<div class="cd-opc"><span class="cd-rot">Via</span>' + (vias.length > 1
+                ? vias.map(v => cdBtn(v, e.via === v, 'data-via="' + v + '"')).join('')
+                : '<span class="cd-fixo">' + vias[0] + '</span>') + '</div>';
+            const ops = c.vias[e.via];
+            h += '<div class="cd-opc"><span class="cd-rot">Dose</span>' + ops.map((o, i) =>
+                cdBtn(o.rot, (o.inp && e.inp === i) || (!o.inp && cd.itens[d.id] === o.linha), 'data-dose="' + i + '"')).join('') + '</div>';
+            if(e.inp !== undefined && ops[e.inp] && ops[e.inp].inp){
+                const p = ops[e.inp].inp;
+                h += '<div class="cd-opc"><span class="cd-rot"></span><input type="number" id="cdNum" min="0" max="' + p.max
+                    + '" step="0.5" placeholder="' + p.ph + '" inputmode="decimal"><span class="cd-fixo">' + p.ph + '</span>'
+                    + '<button type="button" class="cd-add" data-add="inp">Adicionar</button></div>';
+            }
+        }
+        if(cd.itens[d.id]) h += '<button type="button" class="cd-tirar" data-tirar="1">✕ Tirar da prescrição</button>';
+        box.innerHTML = h + '</div>';
+        const num = cdEl('cdNum'); if(num) num.focus();
+    }
+    function cdConfSoro(e){
+        if(!e.bolsas) e.bolsas = 1;
+        if(!e.ritmo) e.ritmo = 'livre';
+        let h = '<div class="cd-opc"><span class="cd-rot">Bolsas</span>' + [1,2,3].map(n => cdBtn(String(n), e.bolsas === n, 'data-bol="' + n + '"')).join('') + '</div>';
+        h += '<div class="cd-opc"><span class="cd-rot">Correr</span>' + cdBtn('livre', e.ritmo === 'livre', 'data-rit="livre"')
+            + cdBtn('em 1 h', e.ritmo === '1', 'data-rit="1"') + cdBtn('em 2 h', e.ritmo === '2', 'data-rit="2"')
+            + cdBtn('gotas/min', e.ritmo === 'gt', 'data-rit="gt"') + '</div>';
+        if(e.ritmo === 'gt') h += '<div class="cd-opc"><span class="cd-rot"></span><input type="number" id="cdNum" min="1" max="300" step="1" placeholder="gotas/min" inputmode="numeric" value="' + (e.gt || '') + '"><span class="cd-fixo">gotas/min</span></div>';
+        if(e.bolsas > 1 && e.ritmo !== 'livre') h += '<label class="cd-check"><input type="checkbox" id="cdPrimLivre"' + (e.primLivre ? ' checked' : '') + '> 1ª bolsa livre (o ritmo acima vale para as outras)</label>';
+        return h + '<button type="button" class="cd-add" data-add="soro">Adicionar</button>';
+    }
+    function cdConfMida(e){
+        const amps = CD_MIDA[cdU()];
+        if(!e.amp || !amps.find(a => a.id === e.amp)) e.amp = amps[0].id;
+        if(!e.via) e.via = 'IM';
+        const a = amps.find(x => x.id === e.amp);
+        return '<div class="cd-opc"><span class="cd-rot">Ampola</span>' + amps.map(x => cdBtn(x.rot, e.amp === x.id, 'data-amp="' + x.id + '"')).join('') + '</div>'
+            + '<div class="cd-opc"><span class="cd-rot">Via</span>' + cdBtn('IM', e.via === 'IM', 'data-via="IM"') + cdBtn('EV', e.via === 'EV', 'data-via="EV"') + '</div>'
+            + '<div class="cd-opc"><span class="cd-rot">Fazer</span><input type="number" id="cdNum" min="0.5" max="' + a.vol + '" step="0.5" placeholder="mL" inputmode="decimal"'
+            + ' value="' + (e.ml || '') + '"><span class="cd-fixo">mL de ' + a.vol + ' mL (' + a.mgml + ' mg/mL)</span></div>'
+            + '<button type="button" class="cd-add" data-add="mida">Adicionar</button>';
+    }
+    function cdConfBronco(e){
+        const B = cdU() === 'B';
+        if(!e.modo) e.modo = 'dois';
+        if(e.salb === undefined) e.salb = 4;
+        if(e.ipra === undefined) e.ipra = 4;
+        if(!e.ciclos) e.ciclos = 3;
+        const step = (k, v) => '<span class="cd-step">' + cdBtn('−', false, 'data-st="' + k + ':-1"') + '<span>' + v + '</span>' + cdBtn('+', false, 'data-st="' + k + ':1"') + '</span>';
+        let h = '<div class="cd-opc"><span class="cd-rot">Usar</span>' + cdBtn('Salbutamol', e.modo === 'salb', 'data-modo="salb"')
+            + cdBtn('Ipratrópio', e.modo === 'ipra', 'data-modo="ipra"') + cdBtn('Os dois', e.modo === 'dois', 'data-modo="dois"') + '</div>';
+        if(e.modo !== 'ipra') h += '<div class="cd-opc"><span class="cd-rot">Salbut.</span>' + step('salb', e.salb) + '<span class="cd-fixo">jatos (spray 100 mcg)</span></div>';
+        if(e.modo !== 'salb') h += B
+            ? '<div class="cd-opc"><span class="cd-rot">Iprat.</span><span class="cd-fixo">40 gotas em inalação</span></div>'
+            : '<div class="cd-opc"><span class="cd-rot">Iprat.</span>' + step('ipra', e.ipra) + '<span class="cd-fixo">jatos (spray 20 mcg)</span></div>';
+        h += '<div class="cd-opc"><span class="cd-rot">Ciclos</span>' + cdBtn('1 ciclo', e.ciclos === 1, 'data-cic="1"') + cdBtn('3 ciclos (20/20 min)', e.ciclos === 3, 'data-cic="3"') + '</div>';
+        return h + '<button type="button" class="cd-add" data-add="bronco">Adicionar</button>';
+    }
+
+    function cdLinhaSoro(d, e){
+        const b = e.bolsas;
+        let ritmo;
+        if(e.ritmo === 'livre') ritmo = 'correr livre';
+        else if(e.ritmo === 'gt'){ const g = parseInt(e.gt, 10); if(!(g > 0 && g <= 300)) return null; ritmo = 'correr a ' + g + ' gotas/min'; }
+        else ritmo = 'correr em ' + e.ritmo + (e.ritmo === '1' ? ' hora' : ' horas');
+        const base = d.rotulo + ' — ' + b + (b > 1 ? ' bolsas' : ' bolsa') + ' EV';
+        if(b > 1 && e.ritmo !== 'livre' && e.primLivre){
+            const resto = b === 2 ? '2ª bolsa ' + ritmo : '2ª e 3ª bolsas ' + ritmo + ', cada uma';
+            return base + ': 1ª bolsa correr livre; ' + resto + '.';
+        }
+        return base + ', ' + (b > 1 && e.ritmo !== 'livre' ? 'cada uma ' : '') + ritmo + '.';
+    }
+    function cdLinhaMida(e){
+        const a = CD_MIDA[cdU()].find(x => x.id === e.amp), ml = parseFloat(e.ml);
+        if(!(ml > 0 && ml <= a.vol)) return null;
+        const fim = ml < a.vol
+            ? ' Fazer APENAS ' + cdFmt(ml) + ' mL da ampola de ' + a.vol + ' mL, não a ampola inteira.'
+            : ' (ampola inteira).';
+        return 'Midazolam ' + a.rot + ' (' + a.mgml + ' mg/mL) — ' + cdFmt(ml) + ' mL (' + cdFmt(ml * a.mgml) + ' mg) ' + e.via + ' agora.' + fim;
+    }
+    function cdLinhaBronco(e){
+        const B = cdU() === 'B';
+        const freq = e.ciclos === 3 ? 'a cada 20 minutos, 3 ciclos' : 'agora, 1 ciclo';
+        const salb = 'Salbutamol 100 mcg/jato — ' + e.salb + ' jatos';
+        const ipra = B ? 'Ipratrópio 0,25 mg/mL — 40 gotas em inalação' : 'Ipratrópio 20 mcg/jato — ' + e.ipra + ' jatos';
+        if(e.modo !== 'ipra' && !(e.salb > 0)) return null;
+        if(e.modo !== 'salb' && !B && !(e.ipra > 0)) return null;
+        const partes = e.modo === 'salb' ? [salb] : e.modo === 'ipra' ? [ipra] : [salb, ipra];
+        return partes.join(' + ') + ', ' + (B && e.modo !== 'salb' ? '' : 'via inalatória, ') + freq + '.';
+    }
+
+    function cdRenderLista(){
+        const ids = Object.keys(cd.itens);
+        let n = 0;
+        cdEl('cdLista').innerHTML = ids.length
+            ? '<div class="cd-titulo">Vai para a prescrição exatamente assim:</div>' + ids.map(id =>
+                '<div class="cd-item"><span>' + cd.itens[id].split('\n').map(l => (++n) + '. ' + l).join('<br>')
+                + '</span><button type="button" aria-label="Tirar" data-rm="' + id + '">✕</button></div>').join('')
+            : '';
+        const chk = cdEl('chkMedicarUpa');
+        if(ids.length) chk.checked = true;
+        if(!RECURSOS_V85.cardapio) return;
+        cdEl('subMedicarUpa').innerText = ids.length
+            ? 'Ligado pelo cardápio (' + ids.length + (ids.length > 1 ? ' itens' : ' item') + '). Pode escrever mais no relato.'
+            : 'Desligado = não gera prescrição interna. Escolher uma droga abaixo liga sozinho.';
+    }
+    function cdTudo(){ cdRenderClasses(); cdRenderDrogas(); cdRenderConf(); cdRenderLista(); }
+    function cdLimpar(){ cd.itens = {}; cd.esc = {}; cd.aberta = null; cdTudo(); }
+    function cdAdicionar(id, linha){ cd.itens[id] = linha; cd.aberta = null; cdTudo(); }
+    function cdAvisoFalta(btn){ const t = btn.innerText; btn.innerText = 'Falta o número (ou passou do volume)'; setTimeout(() => { btn.innerText = t; }, 1600); }
+
+    cdEl('cdClasses').addEventListener('click', ev => {
+        const b = ev.target.closest('button'); if(!b) return;
+        cd.classe = b.dataset.c; cd.aberta = null; cdTudo();
+    });
+    cdEl('cdDrogas').addEventListener('click', ev => {
+        const b = ev.target.closest('button'); if(!b) return;
+        cd.aberta = cd.aberta === b.dataset.d ? null : b.dataset.d; cdRenderDrogas(); cdRenderConf();
+    });
+    cdEl('cdLista').addEventListener('click', ev => {
+        const b = ev.target.closest('[data-rm]'); if(!b) return;
+        delete cd.itens[b.dataset.rm]; cdTudo();
+    });
+    cdEl('cdConf').addEventListener('input', ev => {
+        if(ev.target.id !== 'cdNum') return;
+        const e = cd.esc[cd.aberta];
+        if(cd.aberta === 'mida') e.ml = ev.target.value;
+        else if(cd.aberta === 'sf' || cd.aberta === 'rl') e.gt = ev.target.value;
+        else e.num = ev.target.value;
+    });
+    cdEl('cdConf').addEventListener('change', ev => {
+        if(ev.target.id === 'cdPrimLivre') cd.esc[cd.aberta].primLivre = ev.target.checked;
+    });
+    cdEl('cdConf').addEventListener('keydown', ev => {
+        if(ev.target.id === 'cdNum' && ev.key === 'Enter'){ ev.preventDefault(); const b = cdEl('cdConf').querySelector('[data-add]'); if(b) b.click(); }
+    });
+    cdEl('cdConf').addEventListener('click', ev => {
+        const b = ev.target.closest('button'); if(!b) return;
+        const d = CD_DROGAS.find(x => x.id === cd.aberta), c = cdCfg(d), e = cd.esc[d.id], ds = b.dataset;
+        if(ds.via){ e.via = ds.via; e.inp = undefined; cdRenderConf(); return; }
+        if(ds.dose !== undefined){
+            const o = c.vias[e.via][Number(ds.dose)];
+            if(o.inp){ e.inp = Number(ds.dose); cdRenderConf(); return; }
+            // Tocar de novo na dose já escolhida TIRA da prescrição.
+            if(cd.itens[d.id] === o.linha){ delete cd.itens[d.id]; cd.aberta = null; cdTudo(); return; }
+            cdAdicionar(d.id, o.linha); return;
+        }
+        if(ds.tirar){ delete cd.itens[d.id]; cd.aberta = null; cdTudo(); return; }
+        if(ds.bol){ e.bolsas = Number(ds.bol); cdRenderConf(); return; }
+        if(ds.rit){ e.ritmo = ds.rit; cdRenderConf(); return; }
+        if(ds.amp){ e.amp = ds.amp; cdRenderConf(); return; }
+        if(ds.modo){ e.modo = ds.modo; cdRenderConf(); return; }
+        if(ds.st){ const [k, dv] = ds.st.split(':'); e[k] = Math.max(0, Math.min(12, e[k] + Number(dv))); cdRenderConf(); return; }
+        if(ds.cic){ e.ciclos = Number(ds.cic); cdRenderConf(); return; }
+        if(ds.add){
+            let linha = null;
+            if(ds.add === 'soro') linha = cdLinhaSoro(d, e);
+            else if(ds.add === 'mida') linha = cdLinhaMida(e);
+            else if(ds.add === 'bronco') linha = cdLinhaBronco(e);
+            else if(ds.add === 'inp'){
+                const p = c.vias[e.via][e.inp].inp, n = parseFloat(e.num);
+                if(n > 0 && n <= p.max) linha = p.fn(n);
+            }
+            if(!linha){ cdAvisoFalta(b); return; }
+            cdAdicionar(d.id, linha);
+        }
+    });
+    // Trocar de unidade apaga o que foi escolhido: as listas são diferentes.
+    document.getElementById('unidade').addEventListener('change', () => {
+        cdLimpar();
+        if(!cdDaUnidade().some(d => d.c === cd.classe)) cd.classe = 'analg';
+        cdTudo();
+    });
+    // Desligar o 💉 à mão apaga o cardápio (sem medicar na UPA não há prescrição).
+    cdEl('chkMedicarUpa').addEventListener('change', () => {
+        if(!cdEl('chkMedicarUpa').checked && Object.keys(cd.itens).length) cdLimpar();
+        cdRenderLista();
+    });
+    function cdItensEnvio(){ if(!RECURSOS_V85.cardapio) return []; return Object.keys(cd.itens).map(id => ({ id, linha: cd.itens[id] })); }
+
+    if(!RECURSOS_V85.cardapio) cdEl('cardapio').style.display = 'none';
+    cdTudo();
 
     if(!SENHA){ pedirSenha(); }
     carregarRecentes();
