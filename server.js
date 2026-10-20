@@ -1,5 +1,22 @@
 // ============================================================================
-//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v8.5
+//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v8.6
+//
+//  v8.6 (20/out/2026) — CORREÇÕES DA REVISÃO DO PLANTÃO DE 17→18/OUT (Acrízio).
+//    Escolhidas pelo médico, sempre pela causa geral:
+//    1) Resgate de campo fora do lugar NOS DOIS SENTIDOS: prescrição, receita
+//       e relatório que caíam dentro de "prontuario" sumiam da tela sem aviso.
+//       Agora voltam à raiz e a faixa do motor avisa. Ver
+//       resgatarCamposDentroDoProntuario.
+//    2) Alta com CONDIÇÃO escrita pelo médico ("alta se Tax < 37,4") não vira
+//       mais alta assertiva: a condição dele aparece no item da alta.
+//    3) Nome de paciente NUNCA fica no documento: o servidor troca por
+//       "[nome omitido]" e avisa. O prompt também proíbe nome até em aviso.
+//    4) "2 a 3 vezes ao dia" não vira mais "2 a de 8/8 horas" (faixa intacta).
+//    5) (resolvido pela v8.5: linha de soro não recebe diluição da tabela.)
+//    6) Evolução cujo relato não descreve exame: o prompt proíbe escrever
+//       sistema ou segmento e trazer o exame da admissão.
+//    9) CID que não existe na CID-10 brasileira (I16.0, R09.02...) gera aviso.
+//       Tabela do DATASUS no arquivo NOVO cid10.js (sobe junto).
 //
 //  v8.5 (19/out/2026) — TRÊS FUNÇÕES PARA GANHAR TEMPO NA FICHA VERDE.
 //    Cada uma num commit próprio, para poder voltar atrás em uma só:
@@ -552,6 +569,7 @@ const Redis = require('ioredis');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const { medicamentosAcrizioMenezes, medicamentosBarreiro } = require('./farmacia');
+const { CID10_VALIDOS } = require('./cid10');   // v8.6
 const { diluicoesBarreiro } = require('./diluicoes');
 
 const app = express();
@@ -1082,6 +1100,82 @@ function medicoDeclarouAlta(texto) {
     return padroes.some(re => re.test(t));
 }
 
+// v8.6 — A ALTA QUE O MÉDICO DECLAROU TEM UMA CONDIÇÃO DELE?
+// Ex.: "alta após medicações se Tax < 37,4". No plantão de 17/out a IA
+// escreveu "Dou alta com receita" e a condição do médico SUMIU — porque o
+// detector de alta mandava a alta assertiva e a regra contra condicional
+// mandava apagar condição. Condição que o MÉDICO escreveu é dele e tem de
+// constar. Devolve o trecho da condição como ele escreveu, ou ''.
+// NÃO é condição: orientação de retorno ("alta e retorno se piora", "oriento
+// voltar se febre") — essas ficam como sempre.
+function condicaoDaAlta(texto) {
+    const original = String(texto || '');
+    const t = semAcento(original);
+    const re = /\balta\b([^.;\n]{0,70}?)\b(se|caso|desde que|apenas se|somente se)\s+([^.;\n]{2,90})/g;
+    let m;
+    while ((m = re.exec(t))) {
+        const entre = m[1], cond = m[3];
+        if (/retorn|volt|orient|sinais? de alarme|reavali/.test(entre)) continue;
+        if (/^(houver |tiver |apresentar |surgir )?(piora|pior|sinais?|necessari|precisar|duvida|intercorrenc)/.test(cond)) continue;
+        // Recorta do texto ORIGINAL (com acentos), na mesma posição.
+        const ini = m.index + m[0].length - m[3].length - m[2].length - 1;
+        return original.slice(ini, m.index + m[0].length).trim();
+    }
+    return '';
+}
+
+// v8.6 — O RELATO DESCREVE ALGUM EXAME FÍSICO? Usado na EVOLUÇÃO: no plantão
+// de 17/out, em ~10 reavaliações com relato "assintomático e sem queixas", a
+// IA escreveu ACV, AR, abdome, diurese da sonda e até B2 metálico — exame que
+// ninguém fez naquela hora. Sem nenhum termo de exame no relato, o prompt
+// ganha uma instrução curta proibindo sistema e segmento (regra 26).
+function relatoDescreveExame(texto) {
+    const t = semAcento(String(texto || ''));
+    // Palavras inteiras (siglas curtas, que como prefixo pegariam "região" etc.).
+    const inteiras = /\b(ao ef|ao exame|ef\s*:|ef normal|restante do ef|beg|reg|meg|mvf?|rcr|tec|spo2)\b/;
+    // Começos de palavra (pegam o masculino, o feminino e o plural).
+    const comecos = /\b(exame fisico|bom estado|regular estado|mau estado|ausculta|abdome|abdominal|murmurio|bulhas|glasgow|pa\s*:?\s*\d|fc\s*:?\s*\d|fr\s*:?\s*\d|sat\s*:?\s*\d|tax\s*:?\s*\d|temperatura|afebril|febril|edema|pupil|sibil|crepit|ronco|estertor|eupneic|taquipneic|dispneic|corad|hipocorad|hidratad|desidratad|acianotic|cianotic|anicteric|icteric|defesa|palpac|descompress|giordano|murphy|blumberg|orofaringe|oroscopia|otoscopia|hiperemi|lesao|lesoes|ferida|hematoma|deficit|nistagmo|rigidez|perfundid|pulso|panturrilha|bexigoma|sudoreic|facies|facie|lucid|orientad|agitad|sonolent|torporos|consciente)/;
+    return inteiras.test(t) || comecos.test(t);
+}
+
+// v8.6 — NOME DE PACIENTE NUNCA FICA NO DOCUMENTO (regra 9 e LGPD). No plantão
+// de 17/out a IA percebeu — com acerto — que o anexo era de OUTRO paciente e,
+// para avisar, escreveu o nome completo dele na discussão (e isso foi para o
+// banco de documentos). Esta função troca por "[nome omitido]" o nome próprio
+// que vem logo depois de "paciente", "nome", "Sr." ou "Sra." (duas ou mais
+// palavras com inicial maiúscula). Não mexe em texto em CAIXA ALTA (os blocos
+// [[VERMELHO]] e [[ATENCAO]] são todos maiúsculos) nem em "Paciente
+// reavaliado", que tem a segunda palavra minúscula.
+const RE_NOME_PACIENTE = /\b([Pp]aciente|[Pp]cte|[Nn]ome(?: do paciente| da paciente)?|Sra?\.)(\s*:?\s+)([A-ZÀ-Ý][a-zà-ÿ]+(?:\s+(?:(?:d[aeo]s?|e)\s+)?[A-ZÀ-Ý][a-zà-ÿ]+){1,5})/g;
+function removerNomesDePaciente(txt) {
+    if (!txt || typeof txt !== 'string') return { texto: txt, n: 0 };
+    let n = 0;
+    const texto = txt.replace(RE_NOME_PACIENTE, (_m, rot, sep) => { n++; return rot + sep + '[nome omitido]'; });
+    return { texto, n };
+}
+
+// v8.6 — CID QUE NÃO EXISTE NA CID-10 BRASILEIRA. A IA às vezes escreve código
+// da CID-10-CM americana (I16.0 "crise hipertensiva", R09.02 "hipoxemia"), que
+// o SIGRAH recusa. Confere cada código contra a tabela do DATASUS (cid10.js).
+// Não troca nada: só devolve a lista dos que não existem, para AVISAR.
+function cidsInexistentes(txt) {
+    const ruins = [];
+    // Só o PRIMEIRO código de cada trecho (separado por | ; , / ou linha): a
+    // descrição vem depois dele e pode ter "vitamina B12", que não é CID.
+    String(txt || '').replace(/CID[- ]?10\s*:?/gi, ' ').replace(/CID\s*:?/gi, ' ')
+        .split(/[|;,/\n]/).forEach(trecho => {
+            const m = /^\s*([A-Z])(\d{2})(?:\.(\d+))?(?![\d.])/.exec(trecho);
+            if (!m) return;
+            const cat = m[1] + m[2];
+            const sub = m[3];
+            const ok = sub === undefined ? CID10_VALIDOS.has(cat)
+                : (sub.length === 1 && CID10_VALIDOS.has(cat + sub));
+            const cod = cat + (sub !== undefined ? '.' + sub : '');
+            if (!ok && ruins.indexOf(cod) === -1) ruins.push(cod);
+        });
+    return ruins;
+}
+
 // Transforma a lista de remédios da unidade em texto pra IA ler.
 function formatarFarmacia(lista) {
     return lista.map(item => {
@@ -1351,7 +1445,9 @@ function preferirPrimeiraPessoaConduta(txt) {
 function preferirIntervaloHoras(txt) {
     if (!txt || typeof txt !== 'string') return txt;
     const mapa = { '2': 'de 12/12 horas', '3': 'de 8/8 horas', '4': 'de 6/6 horas', '6': 'de 4/4 horas' };
-    const re = /(?:at[eé]\s+)?\b([2346])\s*(?:x|vezes)\s*(?:\/\s*|\s+(?:ao|por)\s+)dia\b/gi;
+    // v8.6: não converte FAIXA ("2 a 3 vezes ao dia", "2-3x/dia", "2 ou 3 vezes"):
+    // antes o "3 vezes ao dia" era trocado sozinho e sobrava "2 a de 8/8 horas".
+    const re = /(?<!\d\s*(?:a|à|-|–|ou)\s*)(?:at[eé]\s+)?\b([2346])\s*(?:x|vezes)\s*(?:\/\s*|\s+(?:ao|por)\s+)dia\b/gi;
     return txt.replace(re, (m, n) => mapa[n] || m);
 }
 
@@ -2190,6 +2286,36 @@ function resgatarCamposSoltos(dados) {
     return true;
 }
 
+//  v8.6 — RESGATE NO SENTIDO CONTRÁRIO. No plantão de 17/out (BE 936835) o
+//  reparo de estrutura produziu um JSON válido em que "prescricao_interna",
+//  "receita" e "relatorio" ficaram DENTRO de "prontuario". A tela procura
+//  esses documentos na raiz: a prescrição sumiu sem aviso nenhum e o médico
+//  teve de gerar de novo. Mesmo raciocínio do resgate de cima: estes nomes não
+//  significam nada dentro de "prontuario"; se aparecem lá, caíram do lugar.
+//  Nunca sobrescreve campo já preenchido na raiz. Apaga também a chave vazia
+//  ("") que o Claude às vezes deixa dentro de "prontuario".
+const CAMPOS_DA_RAIZ = ['discussao', 'cid', 'evolucao', 'exames_complementares',
+    'prescricao_interna', 'receita', 'relatorio', 'exame_unidade', 'exame_externo',
+    'aih_sinais_sintomas', 'aih_condicoes', 'aih_exames', 'prescricao_internacao', 'fontes'];
+function resgatarCamposDentroDoProntuario(dados) {
+    if (!dados || !dados.prontuario || typeof dados.prontuario !== 'object') return false;
+    const p = dados.prontuario;
+    if (Object.prototype.hasOwnProperty.call(p, '')) delete p[''];
+    const movidos = [];
+    CAMPOS_DA_RAIZ.forEach(k => {
+        if (!Object.prototype.hasOwnProperty.call(p, k)) return;
+        const v = p[k];
+        delete p[k];
+        if (typeof v !== 'string' || !v.trim()) return;
+        if (typeof dados[k] === 'string' && dados[k].trim()) return;   // a raiz já tem: vale a raiz
+        dados[k] = v;
+        movidos.push(k);
+    });
+    if (!movidos.length) return false;
+    console.log('Campos da raiz estavam dentro de "prontuario" e foram devolvidos ao lugar: ' + movidos.join(', ') + '.');
+    return true;
+}
+
 //  v8.2 — guarda a MENSAGEM do último erro de leitura de JSON, só para o log do
 //  Render. Não entra em resposta nenhuma e não guarda conteúdo de paciente.
 let ultimoErroJson = '';
@@ -2816,6 +2942,24 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
                 + '"Mantenho em observação", "Observar" ou "Aguardar" — o paciente está indo embora, '
                 + 'não há reavaliação nesta unidade para acontecer depois.\n';
             console.log('Relato declara ALTA: instrução do CASO B da conduta incluída no prompt.');
+            // v8.6 — a alta tem uma CONDIÇÃO escrita pelo médico: ela tem de constar.
+            const condAlta = condicaoDaAlta(mensagem);
+            if (condAlta) {
+                instrucoesAcao += '- ⚠️ A ALTA DESTE RELATO TEM UMA CONDIÇÃO ESCRITA PELO MÉDICO: «' + condAlta + '». '
+                    + 'Ela é decisão dele e TEM de aparecer no item da alta, com as palavras dele '
+                    + '(ex.: "Dou alta após as medicações ' + condAlta + ', com receita, oriento sinais de alarme...").'
+                    + ' Não a apague, não a transforme em alta assertiva e não invente outra condição.\n';
+                console.log('Alta com condição do médico: instrução incluída no prompt.');
+            }
+        }
+        // v8.6 — EVOLUÇÃO SEM EXAME NO RELATO: proibido inventar sistema/segmento.
+        if (ehEvolucao && !relatoDescreveExame(mensagem)) {
+            instrucoesAcao += '- ⚠️ O RELATO DESTA REAVALIAÇÃO NÃO DESCREVE EXAME FÍSICO. Na "evolucao", a linha "Ao exame:" '
+                + 'pode ter SOMENTE descritores gerais coerentes com o que o médico disse (ex.: paciente assintomático → '
+                + '"Ao exame: BEG, lúcido e orientado, eupneico."). É PROIBIDO escrever ACV, AR, abdome, neurológico, '
+                + 'extremidades, pele, sonda, diurese, ferida ou QUALQUER sistema ou segmento, e proibido trazer o exame da '
+                + 'admissão, do histórico ou de anexo como se tivesse sido feito agora.\n';
+            console.log('Evolução sem exame no relato: instrução contra exame inventado incluída no prompt.');
         }
         if (op.relatorio) {
             instrucoesAcao += '- RELATÓRIO APS.\n';
@@ -3057,7 +3201,9 @@ DOCUMENTOS ANEXADOS (${descricaoAnexos}):
   o médico pediu na mensagem, no tipo de atendimento indicado acima.
 - PRIVACIDADE: IGNORE e OMITA qualquer identificador do paciente que apareça
   no anexo (nome, nome da mãe, CPF, endereço, telefone, convênio). Aproveite
-  APENAS os dados clínicos.
+  APENAS os dados clínicos. NUNCA escreva NOME de pessoa em campo nenhum —
+  nem para avisar. Se o anexo parecer ser de OUTRO paciente, diga isso na
+  "discussao" citando só o que não confere (sexo, idade, data), sem o nome.
 - TRANSCRIÇÃO FIEL: copie números, unidades e valores de exames EXATAMENTE
   como estão no anexo. Se um trecho estiver ilegível, cortado ou borrado,
   escreva "[ilegível]" no lugar e avise na "discussao". É TERMINANTEMENTE
@@ -3259,7 +3405,11 @@ INSTRUÇÕES DE CADA CAMPO:
    CONFIRMAR À BEIRA DO LEITO.)"
 
 2. "cid": APENAS o(s) código(s) CID e descrição. Ex: "J00 - Nasofaringite aguda".
-   Nada além disso neste campo.
+   Nada além disso neste campo. Use SOMENTE a CID-10 BRASILEIRA (DATASUS): código
+   de 3 caracteres ou com UM único dígito depois do ponto (J45.9, N39.0). É
+   PROIBIDO usar a CID-10-CM americana — nada de dois dígitos depois do ponto
+   (R09.02) nem categorias que não existem aqui (I16 "crise hipertensiva"; no
+   Brasil, use I10). O SIGRAH recusa código que não é da tabela brasileira.
 
 2b. "evolucao": preencha SOMENTE quando o tipo de atendimento for EVOLUÇÃO.
    Texto curto e corrido (no máximo ~10 linhas), assertivo, descrevendo a
@@ -3465,7 +3615,10 @@ Neurológico: vigil, orientada, sem déficits focais"
      vale para o CASO A (desfecho ainda não decidido), em que o desfecho vira
      uma NOVA evolução depois. Não confunda: alta que o médico JÁ decidiu e
      escreveu no relato NÃO é condicional — é o CASO B e tem que ser
-     registrada de forma assertiva. Nada disso proíbe sinais de alarme nem
+     registrada de forma assertiva. E se o PRÓPRIO MÉDICO escreveu uma condição
+     para a alta ("alta após as medicações se Tax < 37,4"), a condição é dele:
+     reproduza-a no item da alta, com as palavras dele. A proibição vale só para
+     condição que VOCÊ inventaria. Nada disso proíbe sinais de alarme nem
      orientação de retorno na receita domiciliar, que continuam normais, no
      lugar deles.
      NÃO REPETIR A LISTA DE EXAMES: a lista detalhada já sai na caixa de pedido
@@ -3607,7 +3760,8 @@ ${mensagemPrompt}`;
             // "prontuario" ANTES de qualquer outra coisa. Sem isto, o documento
             // abriria com o prontuário em branco e ninguém perceberia.
             const resgatou = resgatarCamposSoltos(dados);
-            if (resgatou) dados._camposResgatados = true;
+            const resgatouRaiz = resgatarCamposDentroDoProntuario(dados);   // v8.6
+            if (resgatou || resgatouRaiz) dados._camposResgatados = true;
             if (!dados.prontuario) dados.prontuario = {};
             if (typeof dados.evolucao !== 'string') dados.evolucao = '';
 
@@ -3846,6 +4000,33 @@ ${mensagemPrompt}`;
             if (usarBusca && dados.fontes && dados.fontes.trim()) {
                 dados.discussao = (dados.discussao || '')
                     + '\n\n📚 FONTES CONSULTADAS:\n' + dados.fontes.trim();
+            }
+
+            // --- v8.6: CID fora da CID-10 brasileira → AVISA (não troca nada) ---
+            // No pedido externo, só a linha do CID (o resto pode ter "vitamina B12").
+            const linhaCidExterno = String(dados.exame_externo || '').split('\n').filter(l => /CID/i.test(l)).join('\n');
+            const cidsRuins = cidsInexistentes([dados.cid, linhaCidExterno].filter(Boolean).join('\n'));
+            if (cidsRuins.length) {
+                dados.discussao = (dados.discussao || '') + '\n\n🏷️ CID que NÃO consta na tabela CID-10 do DATASUS: '
+                    + cidsRuins.join(', ') + '. O SIGRAH pode recusar — confira e, se for o caso, troque por um código da tabela brasileira.';
+            }
+
+            // --- v8.6: NOME DE PACIENTE NUNCA FICA NO DOCUMENTO (regra 9) ---
+            // Roda por ÚLTIMO, depois de todo aviso acrescentado à discussão.
+            let nomesTirados = 0;
+            const limpar = (obj, k) => {
+                if (!obj || typeof obj[k] !== 'string') return;
+                const r = removerNomesDePaciente(obj[k]);
+                obj[k] = r.texto; nomesTirados += r.n;
+            };
+            ['discussao', 'evolucao', 'exames_complementares', 'relatorio', 'receita', 'prescricao_interna',
+                'exame_externo', 'aih_sinais_sintomas', 'aih_condicoes', 'aih_exames', 'prescricao_internacao']
+                .forEach(k => limpar(dados, k));
+            CAMPOS_DO_PRONTUARIO.forEach(k => limpar(dados.prontuario, k));
+            if (nomesTirados) {
+                dados.discussao = (dados.discussao || '') + '\n\n🔏 A IA escreveu nome de paciente e o sistema o trocou por '
+                    + '"[nome omitido]" (' + nomesTirados + ' vez' + (nomesTirados > 1 ? 'es' : '') + '). Nada foi guardado com o nome.';
+                console.log('Nome de paciente removido do documento: ' + nomesTirados + ' ocorrência(s).');
             }
             return dados;
         }
@@ -4094,6 +4275,11 @@ ${JSON.stringify(dadosClaude)}`;
             dados._avisoReparo = aviso;
             console.log('Aviso de reparo enviado à tela: ' + saida.reparoJson
                 + (dados._camposResgatados ? ' + campos resgatados' : ''));
+        } else if (dados._camposResgatados) {
+            // v8.6: campo fora do lugar SEM reparo de JSON também avisa (regra 15).
+            dados._avisoReparo = 'A IA pôs documentos no campo errado e o servidor os devolveu ao lugar. '
+                + 'Nenhum conteúdo foi alterado, mas confira se cada texto está na caixa certa.';
+            console.log('Aviso de campos reposicionados enviado à tela.');
         }
         delete dados._camposResgatados;
         // Marca qual motor respondeu (e se foi fallback) para a tela avisar.
@@ -4433,10 +4619,10 @@ app.use((err, req, res, next) => {
 // QUAL versão está de fato rodando no Render. Serve para pegar o caso em que o
 // deploy falhou e o Render continuou servindo a versão anterior (o servidor
 // segue no ar, então nada parece errado — mas o código novo não está valendo).
-const VERSAO_SERVIDOR = 'v8.5';
+const VERSAO_SERVIDOR = 'v8.6';
 app.get('/', (req, res) => res.send(
     'Servidor do Prontuario Rapido ' + VERSAO_SERVIDOR + ' no ar. '
-    + 'Linhas esperadas no server.js: 4443.'
+    + 'Linhas esperadas no server.js: 4629.'
 ));
 
 const PORT = process.env.PORT || 3000;
