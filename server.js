@@ -1,5 +1,17 @@
 // ============================================================================
-//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v8.4
+//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v8.5
+//
+//  v8.5 (19/out/2026) — TRÊS FUNÇÕES PARA GANHAR TEMPO NA FICHA VERDE.
+//    Cada uma num commit próprio, para poder voltar atrás em uma só:
+//    1) CAIXINHA "EXAME FÍSICO NORMAL" (só prontuário): marcada, o exame sai
+//       no padrão escrito pelo servidor; com alterações, a IA troca só o que
+//       elas contradizem. Ver efPadraoServidor / blocoExameFisicoPrompt.
+//    2) CARDÁPIO DE MEDICAÇÕES: a tela manda linhas prontas e o servidor as
+//       escreve na prescrição da UPA; a IA só acrescenta o que o relato pedir
+//       a mais. Droga repetida não dobra. Ver mesclarCardapio.
+//    3) 🔬 vira SUGESTÃO de exames na discussão (obrigatórios / ajudam muito /
+//       dispensáveis) e o 🏥 pedido externo passa a ter CID-10 obrigatório.
+//    Para desligar 1 ou 2 sem mexer no servidor: RECURSOS_V85 no index.html.
 //
 //  v8.4 (15/out/2026) — CORREÇÕES DA PRIMEIRA REVISÃO DE PLANTÃO PELO BANCO.
 //    Pedidas pelo médico depois da revisão do plantão de 14→15/out, sempre
@@ -2815,10 +2827,16 @@ app.post('/api/atendimento', limitarAbuso, async (req, res) => {
         // linha "NÃO gere...". Instrução negativa ocupa atenção e não produz
         // nada. A trava do servidor (que zera o campo) continua valendo.
         if (exameUnidade) {
-            instrucoesAcao += '- PEDIDO DE EXAME (NA UNIDADE): redija no campo "exame_unidade" o texto do(s) exame(s) a serem realizados AQUI na UPA, conforme o comando do médico. Se ele indicou quais exames, formate-os; se ele perguntou quais você pediria, escolha os pertinentes ao caso e liste-os de forma assertiva.\n';
+            // v8.5: o 🔬 deixou de gerar pedido. Agora ele pede uma SUGESTÃO de
+            // exames, em três níveis, dentro da discussão.
+            instrucoesAcao += '- SUGESTÃO DE EXAMES (o médico ligou 🔬): NÃO escreva pedido de exame. Na "discussao", logo depois do bloco "SOBRE A SUA CONDUTA", '
+                + 'acrescente um bloco com o rótulo exato "EXAMES PARA ESTE CASO:" em três listas curtas, cada exame com o motivo em poucas palavras: '
+                + '"Obrigatórios:" (sem eles a conduta fica insegura), "Não obrigatórios, mas ajudam muito:" e "Dispensáveis:" (os que costumam ser '
+                + 'pedidos neste quadro mas não mudam a conduta aqui). Lista vazia vira "nenhum". Marque com "(externo)" o exame que a UPA não faz. '
+                + 'Nada de cultura (as unidades não coletam). Exame cujo resultado já está no relato não entra.\n';
         }
         if (exameExterno) {
-            instrucoesAcao += '- PEDIDO DE EXAME (EXTERNO): redija no campo "exame_externo" o texto de solicitação de exame(s) para o paciente realizar em serviço externo (clínica/laboratório particular ou referência), no formato que um médico usaria num pedido. Se o médico indicou o exame, formate-o; se ele perguntou quais pediria, escolha os pertinentes.\n';
+            instrucoesAcao += '- PEDIDO DE EXAME (EXTERNO): redija no campo "exame_externo" o pedido do(s) exame(s) que o paciente vai fazer FORA da unidade, no formato do item 8, SEMPRE com o CID-10 da investigação deste caso. Se o médico indicou o exame, use o dele; se perguntou quais pediria, escolha os pertinentes.\n';
         }
 
         // Ponto 2: bloco de fontes confiáveis (só entra no prompt se busca ligada).
@@ -2858,27 +2876,34 @@ e prossiga com conhecimento geral, sinalizando que não houve fonte confirmada.
         // Cada bloco condicional COMEÇA com vírgula e NÃO termina com vírgula,
         // para o esquema continuar sendo JSON válido em qualquer combinação de
         // toggles (inclusive todos desligados).
-        const chavesExames = (exameUnidade ? ',\n  "exame_unidade": ""' : '')
-                           + (exameExterno ? ',\n  "exame_externo": ""' : '');
+        // v8.5: "exame_unidade" saiu do esquema (o 🔬 agora só sugere na discussão).
+        const chavesExames = exameExterno ? ',\n  "exame_externo": ""' : '';
         const chaveFontes = usarBusca ? ',\n  "fontes": ""' : '';
 
         // v8.0 (fatia O.1): os itens do dicionário de campos dos pedidos de
         // exame só entram no prompt quando o toggle correspondente está ligado.
-        const itemExameUnidade = !exameUnidade ? '' : `7. "exame_unidade": texto do pedido de exame(s) a serem realizados NA PRÓPRIA
-   UPA. Escreva como um pedido médico real (cabeçalho curto + lista dos exames).
-   FORMATO DA LISTA: os exames vão em lista com TRAÇOS ("- Hemograma completo"),
-   UM POR LINHA. É PROIBIDO numerar ("1.", "2.", "1)", "a)"). Quem lê este papel
-   é o paciente, e a lista numerada faz a quantidade parecer maior do que é.
-
-`;
-        const itemExameExterno = !exameExterno ? '' : `8. "exame_externo": texto de solicitação de exame(s) para o paciente realizar
-   FORA da unidade (clínica/laboratório particular ou serviço de referência).
-   Redija no formato consagrado de um pedido de exame ("Solicito..."), citando
-   a indicação clínica quando pertinente. FORMATO DA LISTA: TRAÇOS, um exame por
-   linha, NUNCA numerada — a mesma regra do pedido na unidade.
-   ATENDER AO QUE O MÉDICO PEDIU: quando ele indicar no relato o que o pedido
-   deve conter — o CID, a justificativa clínica, o exame específico, o serviço
-   de destino —, INCLUA exatamente o que foi pedido.
+        const itemExameUnidade = '';   // v8.5: não existe mais pedido de exame na unidade
+        const itemExameExterno = !exameExterno ? '' : `8. "exame_externo": PEDIDO DE EXAME EXTERNO — exame(s) que o paciente vai fazer
+   FORA da unidade (rede SUS de referência, clínica ou laboratório). Formato fixo,
+   nesta ordem:
+   Solicito:
+   - <exame 1>
+   - <exame 2>
+   Indicação clínica: <uma frase com o motivo, a partir do relato>.
+   CID-10: <código> – <descrição>
+   REGRAS DO PEDIDO EXTERNO:
+   (1) O CID-10 é OBRIGATÓRIO e é o CID da INVESTIGAÇÃO deste relato: a hipótese
+       que o exame vai confirmar ou afastar. Se o diagnóstico ainda não está
+       fechado, use o CID do SINAL ou SINTOMA investigado (capítulo R, ex.:
+       "R10.4 – Outras dores abdominais e as não especificadas"), nunca um
+       diagnóstico que o relato não sustenta. Se o médico deu o CID, use o dele.
+   (2) Lista com TRAÇOS, um exame por linha, NUNCA numerada (quem lê é o
+       paciente, e a lista numerada parece maior do que é).
+   (3) Nome do exame por extenso, como se pede no SUS (ex.: "Ultrassonografia de
+       abdome total"), com região e lado quando o médico disse — sem inventar lado.
+   (4) Não escreva "urgente", data, nome do paciente nem assinatura.
+   (5) ATENDER AO QUE O MÉDICO PEDIU: exame específico, justificativa, serviço de
+       destino — inclua exatamente o que ele pediu.
 
 `;
 
@@ -3724,15 +3749,25 @@ ${mensagemPrompt}`;
             // (ceftriaxona prescrita com o 💉 desligado). Agora a lista abaixo
             // vale para todos, e quando a IA escreveu algo que foi descartado
             // o médico é AVISADO (regra 15) — pode ter sido intencional.
+            // v8.5: o pedido de exame na unidade não existe mais (o 🔬 só sugere,
+            // na discussão). Se a IA escrever um por hábito, ele não aparece.
+            if (typeof dados.exame_unidade === 'string' && dados.exame_unidade.trim()) {
+                console.log('exame_unidade descartado: o 🔬 agora só sugere exames na discussão.');
+            }
+            dados.exame_unidade = '';
             const descartados = aplicarTravasDeToggle(dados, [
                 { campo: 'prescricao_interna', ligado: medicarUpa,   nome: '💉 Medicar na UPA' },
                 { campo: 'receita',            ligado: !!op.alta,    nome: '🏠 Receita' },
                 { campo: 'relatorio',          ligado: !!op.relatorio, nome: '📋 Relatório APS' },
-                { campo: 'exame_unidade',      ligado: exameUnidade, nome: '🔬 Exame na unidade' },
                 { campo: 'exame_externo',      ligado: exameExterno, nome: '🏥 Exame externo' }
             ]);
             if (descartados.length > 0) {
                 dados.discussao = (dados.discussao || '') + '\n\n' + avisoDescartePorToggle(descartados);
+            }
+            // v8.5 — pedido externo sem CID não pode passar calado (regra 15).
+            if (exameExterno && dados.exame_externo && !/\bCID/i.test(dados.exame_externo)) {
+                dados.discussao = (dados.discussao || '')
+                    + '\n\n⚠️ O pedido de exame EXTERNO saiu SEM CID — acrescente o CID da investigação antes de entregar.';
             }
 
             // --- v8.5: CARDÁPIO entra na prescrição da UPA (o servidor escreve) ---
@@ -4398,10 +4433,10 @@ app.use((err, req, res, next) => {
 // QUAL versão está de fato rodando no Render. Serve para pegar o caso em que o
 // deploy falhou e o Render continuou servindo a versão anterior (o servidor
 // segue no ar, então nada parece errado — mas o código novo não está valendo).
-const VERSAO_SERVIDOR = 'v8.4';
+const VERSAO_SERVIDOR = 'v8.5';
 app.get('/', (req, res) => res.send(
     'Servidor do Prontuario Rapido ' + VERSAO_SERVIDOR + ' no ar. '
-    + 'Linhas esperadas no server.js: 4170.'
+    + 'Linhas esperadas no server.js: 4443.'
 ));
 
 const PORT = process.env.PORT || 3000;

@@ -1,6 +1,18 @@
 <!DOCTYPE html>
 <!--
-  PRONTUÁRIO RÁPIDO - TELA (FRONTEND) - v8.4 - 15/out/2026
+  PRONTUÁRIO RÁPIDO - TELA (FRONTEND) - v8.5 - 19/out/2026
+  Novidades da v8.5 (cada uma pode ser desligada em RECURSOS_V85, no script):
+   1) Caixinha "Exame físico normal" abaixo do relato (só na aba Prontuário),
+      marcada por padrão, com campo de 3 linhas para alterações e sinais
+      vitais. Escrever no campo desmarca a caixinha.
+   2) Cardápio de medicações da UPA abaixo do 💉 Medicar na UPA, por classe,
+      com a lista de cada unidade. Tocar de novo na dose (ou em "Tirar")
+      desfaz. A linha vai pronta e o servidor a escreve na prescrição.
+      Os anexos desceram para depois do cardápio.
+   3) O 🔬 virou "Sugerir exames (na discussão)": não gera mais pedido.
+  "Limpar relato" agora também limpa o cardápio e remarca o exame normal.
+  Precisa do server.js v8.5 no Render: os dois arquivos sobem JUNTOS.
+
   Novidades da v8.4:
    1) O botão "📋 Copiar" do documento inteiro passa a existir NAS DUAS
       UNIDADES (antes só no Acrízio). Numa evolução ele se chama "Copiar
@@ -473,7 +485,7 @@
             <label class="switch"><input type="checkbox" id="chkRelatorio"><span class="slider"></span></label>
         </div>
         <div class="toggle-item">
-            <span class="lbl">🔬 Pedir exame (na unidade)</span>
+            <span class="lbl">🔬 Sugerir exames (na discussão)</span>
             <label class="switch"><input type="checkbox" id="chkExameUnidade"><span class="slider"></span></label>
         </div>
         <div class="toggle-item">
@@ -1489,7 +1501,7 @@
             [c.opcoes.medicarUpa,    '💉 Medicar na UPA'],
             [c.opcoes.alta,          '🏠 Receita'],
             [c.opcoes.relatorio,     '📋 Relatório APS'],
-            [c.opcoes.exameUnidade,  '🔬 Exame na unidade'],
+            [c.opcoes.exameUnidade,  '🔬 Sugerir exames'],
             [c.opcoes.exameExterno,  '🏥 Exame externo'],
             [c.opcoes.buscarFontes,  '🔎 Buscar em fontes'],
             [c.opcoes.compararIAs,   '⚖️ Comparar IAs'],
