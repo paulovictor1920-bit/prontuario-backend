@@ -1896,7 +1896,27 @@ const CARDAPIO_PRINCIPIOS = {
     bronco: l => /^(salbutamol|ipratropio|fenoterol|inalacao|inalar)/.test(l),
     o2: l => /^(oxigen|o2\b|cateter nasal)/.test(l),
     aas: l => /^(aas\b|acido acetilsalicilico)/.test(l),
-    clopi: l => /^clopidogrel/.test(l)
+    clopi: l => /^clopidogrel/.test(l),
+    // v8.7 — anti-hipertensivos, cardio, antibiótico, insulinas, vitaminas, eletrólitos, anticonvulsivante
+    capto: l => /^captopril/.test(l),
+    anlo: l => /^(anlodipino|amlodipino)/.test(l),
+    hctz: l => /^hidroclorotiazida/.test(l),
+    furo: l => /^furosemida/.test(l),
+    hidral: l => /^hidralazina/.test(l),
+    losar: l => /^losartana/.test(l),
+    espiro: l => /^espironolactona/.test(l),
+    aten: l => /^atenolol/.test(l),
+    propra: l => /^propranolol/.test(l),
+    isso: l => /^(dinitrato de isossorbida|isossorbida|isordil)/.test(l),
+    varf: l => /^(varfarina|marevan)/.test(l),
+    penic: l => /^(benzilpenicilina|penicilina|benzetacil)/.test(l),
+    insreg: l => /^insulina.*regular/.test(l),
+    insnph: l => /^insulina.*nph/.test(l),
+    cxb: l => /^(complexo b|vitaminas do complexo b)/.test(l),
+    tiam: l => /^(tiamina|vitamina b1)/.test(l),
+    mg: l => /^sulfato de magnesio/.test(l),
+    kcl: l => /^(cloreto de potassio|kcl)/.test(l),
+    feni: l => /^(fenitoina|hidantal)/.test(l)
 };
 const NUMERACAO_ITEM = /^\s*(?:\d{1,2}[.)]|[-•*])\s*/;
 
