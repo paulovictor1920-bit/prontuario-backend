@@ -1154,6 +1154,18 @@ function removerNomesDePaciente(txt) {
     return { texto, n };
 }
 
+// v8.7 — TÍTULO DO RELATÓRIO NO ACRÍZIO. O documento da unidade pede o
+// cabeçalho "RELATÓRIO / ENCAMINHAMENTO" e uma linha em branco antes do texto.
+// Só no Acrízio (no Barreiro o SIGRAH já tem o campo próprio). Não duplica se
+// a IA já tiver escrito o título.
+const TITULO_RELATORIO_ACRIZIO = 'RELATÓRIO / ENCAMINHAMENTO';
+function tituloRelatorioAcrizio(txt) {
+    const t = String(txt || '').trim();
+    if (!t) return '';
+    const semTitulo = t.replace(/^\s*RELAT[OÓ]RIO\s*(\/|E|-)?\s*(ENCAMINHAMENTO)?\s*:?\s*\n+/i, '').trim();
+    return TITULO_RELATORIO_ACRIZIO + '\n\n' + semTitulo;
+}
+
 // v8.6 — CID QUE NÃO EXISTE NA CID-10 BRASILEIRA. A IA às vezes escreve código
 // da CID-10-CM americana (I16.0 "crise hipertensiva", R09.02 "hipoxemia"), que
 // o SIGRAH recusa. Confere cada código contra a tabela do DATASUS (cid10.js).
@@ -4028,6 +4040,11 @@ ${mensagemPrompt}`;
                     + '"[nome omitido]" (' + nomesTirados + ' vez' + (nomesTirados > 1 ? 'es' : '') + '). Nada foi guardado com o nome.';
                 console.log('Nome de paciente removido do documento: ' + nomesTirados + ' ocorrência(s).');
             }
+            // --- v8.7: título do relatório no Acrízio (o título não tem nome; roda depois) ---
+            if (unidade === 'ACRIZIO' && dados.relatorio) {
+                dados.relatorio = tituloRelatorioAcrizio(dados.relatorio);
+            }
+
             return dados;
         }
 
