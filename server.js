@@ -1,5 +1,18 @@
 // ============================================================================
-//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v8.6
+//  PRONTUÁRIO RÁPIDO - SERVIDOR (BACKEND) - v8.7
+//
+//  v8.7 (21/out/2026) — pedidos do médico antes do plantão:
+//    1) ACRÍZIO: o relatório para a APS sai com o título "RELATÓRIO /
+//       ENCAMINHAMENTO" e uma linha em branco antes do texto
+//       (tituloRelatorioAcrizio). No Barreiro, nada muda.
+//    2) INTERNAÇÃO (as duas UPAs): o topo da discussão traz o CÓDIGO SUS DO
+//       PROCEDIMENTO (tabela SIGTAP) do CID principal — um código por CID, no
+//       máximo dois. A IA sugere ("aih_procedimento"); o servidor confere na
+//       tabela oficial (sigtap.js, NOVO) e só imprime código compatível com o
+//       CID. Sem sugestão válida e com mais de uma opção, lista as opções.
+//    3) Cardápio: princípios das drogas novas (anti-hipertensivos, isossorbida,
+//       varfarina, penicilina benzatina, insulinas, complexo B, tiamina,
+//       sulfato de magnésio, KCl, fenitoína) para a droga repetida não dobrar.
 //
 //  v8.6 (20/out/2026) — CORREÇÕES DA REVISÃO DO PLANTÃO DE 17→18/OUT (Acrízio).
 //    Escolhidas pelo médico, sempre pela causa geral:
@@ -4746,10 +4759,10 @@ app.use((err, req, res, next) => {
 // QUAL versão está de fato rodando no Render. Serve para pegar o caso em que o
 // deploy falhou e o Render continuou servindo a versão anterior (o servidor
 // segue no ar, então nada parece errado — mas o código novo não está valendo).
-const VERSAO_SERVIDOR = 'v8.6';
+const VERSAO_SERVIDOR = 'v8.7';
 app.get('/', (req, res) => res.send(
     'Servidor do Prontuario Rapido ' + VERSAO_SERVIDOR + ' no ar. '
-    + 'Linhas esperadas no server.js: 4629.'
+    + 'Linhas esperadas no server.js: 4769.'
 ));
 
 const PORT = process.env.PORT || 3000;
