@@ -570,6 +570,7 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const { medicamentosAcrizioMenezes, medicamentosBarreiro } = require('./farmacia');
 const { CID10_VALIDOS } = require('./cid10');   // v8.6
+const { SIGTAP_PROCEDIMENTOS, SIGTAP_POR_CID, SIGTAP_NOME, SIGTAP_COMPETENCIA } = require('./sigtap');   // v8.7
 const { diluicoesBarreiro } = require('./diluicoes');
 
 const app = express();
@@ -1186,6 +1187,73 @@ function cidsInexistentes(txt) {
             if (!ok && ruins.indexOf(cod) === -1) ruins.push(cod);
         });
     return ruins;
+}
+
+// v8.7 — CÓDIGO SUS DO PROCEDIMENTO DA INTERNAÇÃO (tabela SIGTAP). Para pedir
+// a AIH o médico digita, além do CID, o código do procedimento de tratamento
+// (ex.: 03.03.14.015-1, tratamento de pneumonia) — e esse código TEM de ser
+// compatível com o CID principal. A IA sugere (campo "aih_procedimento") e o
+// SERVIDOR CONFERE contra a tabela oficial (sigtap.js); nunca imprime código
+// que a tabela não confirma para aquele CID.
+function formatarSigtap(cod) {
+    const c = String(cod || '');
+    return c.length === 10 ? c.slice(0, 2) + '.' + c.slice(2, 4) + '.' + c.slice(4, 6) + '.' + c.slice(6, 9) + '-' + c.slice(9) : c;
+}
+// CIDs principais: o PRIMEIRO código de cada trecho do campo "cid", no máximo 2.
+function cidsPrincipais(txt) {
+    const lista = [];
+    String(txt || '').replace(/CID[- ]?10\s*:?/gi, ' ').replace(/CID\s*:?/gi, ' ')
+        .split(/[|;,/\n]/).forEach(trecho => {
+            const m = /^\s*[-•]?\s*([A-Z])(\d{2})(?:\.?(\d))?(?![\d.])/.exec(trecho);
+            if (!m) return;
+            const cod = m[1] + m[2] + (m[3] || '');
+            if (lista.indexOf(cod) === -1 && lista.length < 2) lista.push(cod);
+        });
+    return lista;
+}
+// Procedimentos compatíveis com o CID. CID só com a categoria ("J18") junta os
+// de todas as subcategorias.
+function procedimentosDoCid(cid) {
+    if (SIGTAP_POR_CID.has(cid)) return SIGTAP_POR_CID.get(cid).slice();
+    if (cid.length !== 3) return [];
+    const juntos = [];
+    for (let d = 0; d <= 9; d++) {
+        (SIGTAP_POR_CID.get(cid + d) || []).forEach(p => { if (juntos.indexOf(p) === -1) juntos.push(p); });
+    }
+    return juntos;
+}
+function mostrarCid(cid) { return cid.length === 4 ? cid.slice(0, 3) + '.' + cid[3] : cid; }
+function montarBlocoSigtap(cidTxt, sugestao) {
+    const cids = cidsPrincipais(cidTxt);
+    const codigosIA = (String(sugestao || '').match(/\b03\.?\d{2}\.?\d{2}\.?\d{3}[-.]?\d\b/g) || [])
+        .map(c => c.replace(/\D/g, ''));
+    const linhas = [];
+    let corrigido = false;
+    if (!cids.length) {
+        return { texto: 'CÓDIGO SUS DO PROCEDIMENTO (AIH): não há CID no documento — preencha o CID e confira o código no SIGTAP.', corrigido: true };
+    }
+    cids.forEach(cid => {
+        const ok = procedimentosDoCid(cid);
+        const escolhido = codigosIA.find(c => ok.indexOf(c) !== -1);
+        if (escolhido) {
+            linhas.push('- ' + mostrarCid(cid) + ' → ' + formatarSigtap(escolhido) + ' — ' + SIGTAP_NOME.get(escolhido));
+        } else if (ok.length === 1) {
+            linhas.push('- ' + mostrarCid(cid) + ' → ' + formatarSigtap(ok[0]) + ' — ' + SIGTAP_NOME.get(ok[0]));
+            if (codigosIA.length) corrigido = true;
+        } else if (ok.length > 1) {
+            corrigido = true;
+            linhas.push('- ' + mostrarCid(cid) + ' → ESCOLHA UM (a tabela aceita mais de um para este CID):\n'
+                + ok.map(p => '   · ' + formatarSigtap(p) + ' — ' + SIGTAP_NOME.get(p)).join('\n'));
+        } else {
+            corrigido = true;
+            linhas.push('- ' + mostrarCid(cid) + ' → nenhum procedimento de tratamento clínico aceita este CID como principal na tabela SIGTAP. '
+                + 'Troque o CID principal por um mais específico ou confira no SIGTAP.');
+        }
+    });
+    return {
+        texto: 'CÓDIGO SUS DO PROCEDIMENTO (AIH) — conferido na tabela SIGTAP ' + SIGTAP_COMPETENCIA.replace(/(\d{4})(\d{2})/, '$2/$1') + ':\n' + linhas.join('\n'),
+        corrigido
+    };
 }
 
 // Transforma a lista de remédios da unidade em texto pra IA ler.
@@ -2308,7 +2376,7 @@ function resgatarCamposSoltos(dados) {
 //  ("") que o Claude às vezes deixa dentro de "prontuario".
 const CAMPOS_DA_RAIZ = ['discussao', 'cid', 'evolucao', 'exames_complementares',
     'prescricao_interna', 'receita', 'relatorio', 'exame_unidade', 'exame_externo',
-    'aih_sinais_sintomas', 'aih_condicoes', 'aih_exames', 'prescricao_internacao', 'fontes'];
+    'aih_sinais_sintomas', 'aih_condicoes', 'aih_exames', 'aih_procedimento', 'prescricao_internacao', 'fontes'];
 function resgatarCamposDentroDoProntuario(dados) {
     if (!dados || !dados.prontuario || typeof dados.prontuario !== 'object') return false;
     const p = dados.prontuario;
@@ -3070,6 +3138,7 @@ e prossiga com conhecimento geral, sinalizando que não houve fonte confirmada.
   "aih_sinais_sintomas": "",
   "aih_condicoes": "",
   "aih_exames": "",
+  "aih_procedimento": "",
   "prescricao_internacao": ""`;
             blocoInternacao = `
 ════════════════ MODO INTERNAÇÃO — ABA PRÓPRIA (v8.1) ════════════════
@@ -3125,6 +3194,17 @@ C) "aih_exames" (campo 22): SOMENTE exames REALMENTE realizados e relatados,
    complementares nesta unidade." e nada mais. Nunca escreva hemograma, PCR,
    raio-X ou qualquer valor que não esteja no relato do médico ou já registrado
    em "exames_complementares".
+
+E) "aih_procedimento" (v8.7): o CÓDIGO SUS DO PROCEDIMENTO de tratamento
+   clínico da internação, da tabela SIGTAP, compatível com o CID PRINCIPAL.
+   UM código por CID principal: internação com um CID claro → um código só;
+   com dois CIDs principais → um código para cada (no máximo 2). No campo
+   "cid", escreva o CID PRINCIPAL PRIMEIRO (e o segundo, se houver, logo
+   depois). Formato, uma linha por CID: "J18.9 → 0303140151".
+   Escolha SOMENTE desta lista, pelo nome que corresponde ao CID:
+${SIGTAP_PROCEDIMENTOS.map(p => '   ' + p[0] + ' ' + p[1]).join('\n')}
+   O sistema confere o código contra a tabela oficial e mostra o resultado na
+   discussão — não escreva o código em nenhum outro campo.
 
 D) "prescricao_internacao": prescrição da internação, nesta ordem de blocos
    (omita o bloco que não se aplicar ao caso):
@@ -4022,6 +4102,16 @@ ${mensagemPrompt}`;
                 dados.discussao = (dados.discussao || '') + '\n\n🏷️ CID que NÃO consta na tabela CID-10 do DATASUS: '
                     + cidsRuins.join(', ') + '. O SIGRAH pode recusar — confira e, se for o caso, troque por um código da tabela brasileira.';
             }
+
+            // --- v8.7: CÓDIGO SUS DO PROCEDIMENTO da internação, NO TOPO da
+            // discussão (onde o médico procura). A sugestão da IA só passa se
+            // a tabela SIGTAP confirmar que é compatível com o CID principal.
+            if (internacao) {
+                const sig = montarBlocoSigtap(dados.cid, dados.aih_procedimento);
+                dados.discussao = sig.texto + '\n\n' + (dados.discussao || '');
+                if (sig.corrigido) console.log('SIGTAP: sugestão da IA ausente ou incompatível com o CID — opções da tabela mostradas.');
+            }
+            delete dados.aih_procedimento;
 
             // --- v8.6: NOME DE PACIENTE NUNCA FICA NO DOCUMENTO (regra 9) ---
             // Roda por ÚLTIMO, depois de todo aviso acrescentado à discussão.
